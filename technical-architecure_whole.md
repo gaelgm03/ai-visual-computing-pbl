@@ -99,8 +99,9 @@ A Face ID-like prototype that performs real-time face enrollment and authenticat
 | **3D Visualization** | Open3D (backend) + Three.js or Plotly (frontend) | Point cloud rendering; Plotly also works in Colab notebooks |
 | **Point Cloud Ops** | Open3D, scipy.spatial | ICP, KDTree, Chamfer distance computation |
 | **Template Storage** | SQLite + filesystem (`.npz` files) | Simple, portable, no external DB dependency |
-| **Shared Data** | Google Drive | Pre-computed `.npz` files shared between CS-1 (laptop) and others (Colab) |
-| **Config** | YAML (`config.yaml`) | Single source of truth for all tunable parameters |
+| **Code Management** | GitHub | Single source of truth for all source code, configs, and tests |
+| **Large Binary Data** | Google Drive (shared folder) | MASt3R checkpoints (~1 GB), `.npz` templates, raw captures — too large for GitHub's 100 MB file limit |
+| **Config** | YAML (`config.yaml`) | Single source of truth for all tunable parameters; tracked in GitHub |
 | **Environment** | Conda + pip (local) / Colab runtime (remote) | Match MASt3R's official environment setup |
 
 ---
@@ -988,24 +989,38 @@ server:
 └──────────┴──────────────────┴───────────────────────────────────┘
 ```
 
-**Shared data pipeline**: CS-1 captures face images on the laptop, runs MASt3R, and exports intermediate data (pointmaps, descriptors, point clouds) as `.npz` files to a shared Google Drive folder. DS members and CS-2 can load these in Colab without needing to run MASt3R themselves.
+**Where code and data live**:
 
 ```
-Google Drive (shared folder)
+GitHub Repository (source of truth for ALL code)
+└── face-auth-mast3r/
+    ├── core/                  # All source code
+    ├── api/
+    ├── frontend/
+    ├── scripts/
+    ├── tests/
+    ├── config.yaml
+    ├── requirements.txt
+    ├── .gitignore             # Excludes checkpoints/, storage/, *.npz, third_party/
+    └── README.md
+
+Google Drive (shared folder — large binary files only, NOT code)
 └── face-auth-data/
-    ├── raw_captures/           # Webcam frames captured by CS-1
+    ├── checkpoints/               # MASt3R weights (~1 GB, too large for GitHub)
+    │   └── MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth
+    ├── raw_captures/              # Webcam frames captured by CS-1
     │   ├── alice/
     │   │   ├── frame_001.jpg
     │   │   └── ...
     │   └── bob/
-    ├── mast3r_outputs/         # Pre-computed by CS-1 on RTX 5070
+    ├── mast3r_outputs/            # Pre-computed by CS-1 on RTX 5070
     │   ├── alice_enrollment.npz   # {point_cloud, descriptors, confidence}
     │   ├── alice_probe_01.npz
     │   └── bob_enrollment.npz
-    └── evaluation_results/     # DS team writes here
+    └── evaluation_results/        # DS team writes here
 ```
 
-This decouples GPU-heavy MASt3R inference (CS-1 only) from algorithm development (everyone else).
+CS-1 captures face images on the laptop, runs MASt3R, and exports intermediate data to the shared Drive folder. DS members and CS-2 can load these on Colab without running MASt3R themselves. This keeps the GitHub repo lightweight while ensuring everyone can access GPU-generated artifacts.
 
 ### 14.1 Phase 1: Foundation (Week 1-2)
 
@@ -1061,6 +1076,96 @@ main
 ```
 
 **Merge protocol**: Feature branch → PR to `develop` → at least 1 review → merge. Integrate to `main` for milestones.
+
+### 14.5 Git Workflow on Each Environment
+
+**CS-1 (RTX 5070 Laptop) — standard local development:**
+```bash
+git clone git@github.com:your-team/face-auth-mast3r.git
+cd face-auth-mast3r
+git checkout -b feature/cs1-mast3r-engine
+# ... develop ...
+git add -A && git commit -m "feat: implement infer_pair()"
+git push origin feature/cs1-mast3r-engine
+# → Open PR on GitHub
+```
+
+**CS-2 / DS members (Google Colab) — clone into Colab runtime, push back to GitHub:**
+```python
+# ── Cell 1: Mount Drive (for large data files) ──
+from google.colab import drive
+drive.mount('/content/drive')
+
+# ── Cell 2: Clone repo from GitHub (every session) ──
+# Option A: HTTPS (simpler — prompts for token on push)
+!git clone https://github.com/your-team/face-auth-mast3r.git /content/repo
+
+# Option B: SSH (if you add your SSH key to Colab — more seamless)
+# !git clone git@github.com:your-team/face-auth-mast3r.git /content/repo
+
+%cd /content/repo
+!git checkout develop
+!git pull origin develop
+!git checkout -b feature/ds1-matching-algorithm
+```
+
+```python
+# ── Cell 3: Symlink large files from Drive into repo ──
+import os
+# Model checkpoint: lives on Drive, symlinked into repo's checkpoints/
+os.makedirs("/content/repo/checkpoints", exist_ok=True)
+!ln -sf /content/drive/MyDrive/face-auth-data/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
+        /content/repo/checkpoints/
+
+# Pre-computed data: symlink into a local path the code can reference
+!ln -sf /content/drive/MyDrive/face-auth-data/mast3r_outputs /content/repo/data_shared
+```
+
+```python
+# ── After making changes: commit and push ──
+!git config user.email "member@example.com"
+!git config user.name "Member Name"
+!git add -A
+!git commit -m "feat: implement ICP-based geometric matcher"
+!git push origin feature/ds1-matching-algorithm
+# → Open PR on GitHub
+```
+
+> **Note for Colab users**: The repo is cloned into `/content/repo/` which is **ephemeral** — it disappears when the session ends. Always push your changes to GitHub before the session times out. Do NOT rely on Colab's filesystem for code persistence. Google Drive is only for large binary data, not code.
+
+### 14.6 `.gitignore`
+
+```gitignore
+# Model weights (stored on Google Drive, not GitHub)
+checkpoints/
+*.pth
+
+# Runtime data
+storage/
+*.npz
+*.sqlite
+
+# Symlinks to Drive data
+data_shared
+
+# MASt3R submodule build artifacts
+third_party/mast3r/dust3r/croco/models/curope/build/
+third_party/mast3r/dust3r/croco/models/curope/*.so
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+```
 
 ---
 
@@ -1188,15 +1293,15 @@ if __name__ == "__main__":
     test_mast3r_inference()
 ```
 
-## Appendix C: Google Colab Setup Notebook
+## Appendix C: Google Colab Session Setup
 
-Copy this into the first cells of any Colab notebook used for this project.
+Run these cells at the **start of every Colab session**. The Colab runtime is ephemeral — code must be pushed to GitHub before the session ends.
 
 ```python
 # ============================================================
 # Cell 1: GPU Check + Google Drive Mount
 # ============================================================
-import torch
+import torch, os
 
 if not torch.cuda.is_available():
     raise RuntimeError("No GPU detected. Go to Runtime > Change runtime type > T4 GPU")
@@ -1208,9 +1313,8 @@ print(f"✅ GPU: {gpu_name} ({vram_gb:.1f} GB VRAM)")
 from google.colab import drive
 drive.mount('/content/drive')
 
-# Shared project data folder
-import os
 SHARED_DIR = "/content/drive/MyDrive/face-auth-data"
+os.makedirs(f"{SHARED_DIR}/checkpoints", exist_ok=True)
 os.makedirs(f"{SHARED_DIR}/raw_captures", exist_ok=True)
 os.makedirs(f"{SHARED_DIR}/mast3r_outputs", exist_ok=True)
 os.makedirs(f"{SHARED_DIR}/evaluation_results", exist_ok=True)
@@ -1219,30 +1323,79 @@ print(f"✅ Shared data dir: {SHARED_DIR}")
 
 ```python
 # ============================================================
-# Cell 2: Install MASt3R (~3-5 min, needed every session)
+# Cell 2: Clone YOUR team's GitHub repo (source of truth for code)
+# ============================================================
+REPO_URL = "https://github.com/your-team/face-auth-mast3r.git"  # ← UPDATE THIS
+BRANCH   = "develop"  # or your feature branch
+
+!git clone {REPO_URL} /content/repo 2>/dev/null || echo "Already cloned"
+%cd /content/repo
+!git fetch origin
+!git checkout {BRANCH}
+!git pull origin {BRANCH}
+
+# Configure git identity (needed for commits)
+!git config user.email "your-email@example.com"   # ← UPDATE THIS
+!git config user.name "Your Name"                  # ← UPDATE THIS
+
+print(f"✅ Repo ready at /content/repo on branch: {BRANCH}")
+```
+
+```python
+# ============================================================
+# Cell 3: Symlink large binary data from Drive into repo
+#          (These files are gitignored — they live on Drive, not GitHub)
+# ============================================================
+import os
+
+# Model checkpoint
+os.makedirs("/content/repo/checkpoints", exist_ok=True)
+!ln -sf {SHARED_DIR}/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
+        /content/repo/checkpoints/
+
+# Pre-computed MASt3R outputs (for DS team to work without GPU)
+!ln -sf {SHARED_DIR}/mast3r_outputs /content/repo/data_shared
+
+print("✅ Drive data symlinked into repo")
+```
+
+```python
+# ============================================================
+# Cell 4: Install MASt3R dependencies (~3-5 min, needed every session)
 # ============================================================
 %%bash
-cd /content
-if [ ! -d "mast3r" ]; then
-    git clone --recursive https://github.com/naver/mast3r.git
-fi
-cd mast3r
+cd /content/repo/third_party/mast3r 2>/dev/null || {
+    # If submodule not initialized, clone standalone
+    cd /content
+    if [ ! -d "mast3r" ]; then
+        git clone --recursive https://github.com/naver/mast3r.git
+    fi
+    cd mast3r
+}
 pip install -q -r requirements.txt
 pip install -q -r dust3r/requirements.txt
 
 # Optional: compile RoPE CUDA kernels
 cd dust3r/croco/models/curope/
 python setup.py build_ext --inplace 2>/dev/null || echo "RoPE compile skipped (non-critical)"
-cd /content
 ```
 
 ```python
 # ============================================================
-# Cell 3: Load MASt3R Model
+# Cell 5: Configure Python path + Load MASt3R model
 # ============================================================
 import sys
-sys.path.insert(0, "/content/mast3r")
-sys.path.insert(0, "/content/mast3r/dust3r")
+
+# Prefer the submodule inside repo; fall back to standalone clone
+if os.path.exists("/content/repo/third_party/mast3r"):
+    sys.path.insert(0, "/content/repo/third_party/mast3r")
+    sys.path.insert(0, "/content/repo/third_party/mast3r/dust3r")
+else:
+    sys.path.insert(0, "/content/mast3r")
+    sys.path.insert(0, "/content/mast3r/dust3r")
+
+# Also add our own project to path
+sys.path.insert(0, "/content/repo")
 
 from mast3r.model import AsymmetricMASt3R
 
@@ -1256,9 +1409,9 @@ print("✅ MASt3R model loaded")
 
 ```python
 # ============================================================
-# Cell 4: Load Pre-computed Data from Shared Drive (for DS team)
-#          DS members do NOT need to run MASt3R themselves —
-#          they work with .npz files exported by CS-1.
+# Cell 6: Load Pre-computed Data (for DS team — no GPU needed)
+#          DS members can skip Cells 4-5 and work directly with
+#          .npz files exported by CS-1.
 # ============================================================
 import numpy as np
 
@@ -1276,6 +1429,16 @@ def load_template(user_name: str) -> dict:
 # Example usage:
 # alice = load_template("alice")
 # print(f"Alice template: {alice['point_cloud'].shape[0]} points")
+```
+
+```python
+# ============================================================
+# ⚠️  BEFORE SESSION ENDS: Push your changes to GitHub!
+# ============================================================
+# %cd /content/repo
+# !git add -A
+# !git commit -m "feat: your commit message here"
+# !git push origin {BRANCH}
 ```
 
 ## Appendix D: CS-1 Data Export Script (for Shared Drive)
