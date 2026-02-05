@@ -198,6 +198,56 @@ def test_config_loading():
     return True
 
 
+def test_api_client():
+    """Test API client in mock mode."""
+    print("\nTesting APIClient (mock mode)...")
+    
+    from frontend.api_client import APIClient, ConnectionMode
+    
+    client = APIClient(mode=ConnectionMode.MOCK)
+    
+    # Test enrollment flow
+    session = client.start_enrollment("TestUser")
+    assert session.is_active, "Session should be active"
+    assert session.user_name == "TestUser", "User name should match"
+    print("  ✓ Enrollment session started")
+    
+    # Test frame processing
+    import numpy as np
+    dummy_frame = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+    
+    result = client.process_enrollment_frame(dummy_frame)
+    assert result.frame_id > 0, "Frame ID should be positive"
+    print(f"  ✓ Frame processed: face_detected={result.face_detected}")
+    
+    # Process more frames to accumulate keyframes
+    for _ in range(20):
+        client.process_enrollment_frame(dummy_frame)
+    
+    # Test accumulated cloud
+    points, colors = client.get_enrollment_cloud()
+    if points is not None:
+        print(f"  ✓ Point cloud accumulated: {len(points)} points")
+    
+    # Test complete enrollment
+    completion = client.complete_enrollment()
+    assert "success" in completion, "Completion should have success key"
+    print(f"  ✓ Enrollment completed: success={completion.get('success')}")
+    
+    # Test authentication
+    auth_result = client.authenticate([dummy_frame], target_user="TestUser")
+    assert hasattr(auth_result, 'is_match'), "Auth result should have is_match"
+    assert hasattr(auth_result, 'final_score'), "Auth result should have final_score"
+    print(f"  ✓ Authentication: is_match={auth_result.is_match}, score={auth_result.final_score:.2f}")
+    
+    # Test user listing
+    users = client.list_users()
+    assert isinstance(users, list), "Users should be a list"
+    print(f"  ✓ User list: {len(users)} users")
+    
+    return True
+
+
 def main():
     """Run all smoke tests."""
     print("=" * 60)
@@ -213,6 +263,7 @@ def main():
         test_auth_panel,
         test_webcam_capture_static,
         test_config_loading,
+        test_api_client,
     ]
     
     for test_fn in tests:

@@ -9,26 +9,30 @@ Run with: python -m frontend.app_gradio
 import gradio as gr
 import numpy as np
 import cv2
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import time
 
 from frontend.components.webcam_capture import WebcamCapture, CaptureConfig
 from frontend.components.enrollment_guide import EnrollmentGuide, HeadPose, EnrollmentConfig
 from frontend.components.auth_panel import AuthPanel, AuthResult, AuthConfig
 from frontend.components.visualization import PointCloudVisualizer, PointCloudData
+from frontend.api_client import get_api_client, ConnectionMode
 
 
 # ============================================================
-# Global State (will be replaced with proper state management)
+# Global State
 # ============================================================
 webcam = WebcamCapture(CaptureConfig(width=640, height=480))
 enrollment_guide = EnrollmentGuide(EnrollmentConfig(target_frames=12))
 auth_panel = AuthPanel(AuthConfig())
 visualizer = PointCloudVisualizer(max_points=10000)
+api_client = get_api_client()
 
-# Simulated captured frames for enrollment (placeholder until API connected)
-_enrollment_frames = []
-_enrollment_poses = []
+# Enrollment state
+_enrollment_active = False
+_enrollment_user = ""
+_enrollment_poses: List[HeadPose] = []
+_last_frame_result = None
 
 
 # ============================================================
@@ -37,84 +41,163 @@ _enrollment_poses = []
 
 def start_enrollment(user_name: str):
     """Initialize enrollment session."""
+    global _enrollment_active, _enrollment_user, _enrollment_poses, _last_frame_result
+    
     if not user_name or not user_name.strip():
-        return None, "⚠️ Please enter a user name", gr.update()
+        return None, "⚠️ Please enter a user name", create_coverage_plot(), create_live_cloud_plot()
     
+    # Reset state
     enrollment_guide.reset()
-    _enrollment_frames.clear()
     _enrollment_poses.clear()
+    _enrollment_active = True
+    _enrollment_user = user_name.strip()
+    _last_frame_result = None
     
-    return None, f"📷 Starting enrollment for **{user_name}**\nLook at the camera and slowly turn your head", gr.update(interactive=True)
+    # Start API session
+    api_client.start_enrollment(_enrollment_user)
+    
+    status = f"""## 📷 Enrollment Started for **{_enrollment_user}**
+    
+**Instructions:**
+1. Look at the camera
+2. Slowly turn your head following the arrows
+3. Cover all directions (left, right, up, down)
+4. Wait for 12 keyframes to be captured
+"""
+    
+    return None, status, create_coverage_plot(), create_live_cloud_plot()
 
 
 def process_enrollment_frame(frame: Optional[np.ndarray], user_name: str):
     """
-    Process a frame during enrollment.
-    
-    In the full implementation, this will:
-    1. Send frame to backend via WebSocket
-    2. Receive face detection + pose info
-    3. Update enrollment guide
-    
-    For now, we simulate with placeholder logic.
+    Process a frame during enrollment via API client.
     """
-    if frame is None:
+    global _last_frame_result
+    
+    if frame is None or not _enrollment_active:
         return None, enrollment_guide.format_status_message(), create_coverage_plot()
     
-    # Simulate face detection and pose estimation
-    # In production, this comes from the backend API
-    simulated_pose = HeadPose(
-        yaw=np.random.uniform(-30, 30),
-        pitch=np.random.uniform(-15, 15),
-        roll=np.random.uniform(-5, 5),
+    # Send frame to API (mock or live)
+    result = api_client.process_enrollment_frame(frame)
+    _last_frame_result = result
+    
+    # Extract pose from result
+    pose = HeadPose(
+        yaw=result.head_pose.get("yaw", 0) if result.head_pose else 0,
+        pitch=result.head_pose.get("pitch", 0) if result.head_pose else 0,
+        roll=result.head_pose.get("roll", 0) if result.head_pose else 0,
     )
     
-    # Simulate keyframe capture (every ~10 frames when face detected)
-    should_capture = len(_enrollment_frames) < 12 and np.random.random() < 0.1
-    
-    if should_capture:
-        _enrollment_frames.append(frame.copy())
-        _enrollment_poses.append(simulated_pose)
+    # Track poses for keyframes
+    if result.is_keyframe:
+        _enrollment_poses.append(pose)
     
     # Update coverage
     enrollment_guide.update_coverage(_enrollment_poses)
     
     # Draw overlay on frame
-    annotated_frame = draw_enrollment_overlay(frame, simulated_pose, should_capture)
+    annotated_frame = draw_enrollment_overlay(
+        frame, 
+        pose, 
+        result.face_detected,
+        result.face_bbox,
+        result.is_keyframe,
+        result.quality_score,
+    )
     
-    status_msg = enrollment_guide.format_status_message()
+    status_msg = format_enrollment_status(result)
     coverage_plot = create_coverage_plot()
     
     return annotated_frame, status_msg, coverage_plot
 
 
+def format_enrollment_status(result) -> str:
+    """Format enrollment status message based on API result."""
+    keyframes = len(_enrollment_poses)
+    
+    if not result.face_detected:
+        return f"""## ⚠️ No Face Detected
+
+**Keyframes:** {keyframes}/12
+
+Please position your face in the camera view."""
+    
+    direction = enrollment_guide.get_next_direction()
+    direction_text = f"Turn **{direction}**" if direction and direction != "center" else "Hold steady"
+    
+    quality_bar = "█" * int(result.quality_score * 10) + "░" * (10 - int(result.quality_score * 10))
+    
+    status = f"""## 📷 Enrollment in Progress
+
+**Keyframes:** {keyframes}/12 {'✅' if keyframes >= 12 else ''}
+**Quality:** [{quality_bar}] {result.quality_score:.0%}
+**Direction:** {direction_text}
+"""
+    
+    if result.is_keyframe:
+        status += "\n✨ **Keyframe captured!**"
+    
+    return status
+
+
 def draw_enrollment_overlay(
     frame: np.ndarray,
     pose: HeadPose,
-    was_captured: bool
+    face_detected: bool,
+    face_bbox: Optional[tuple],
+    is_keyframe: bool,
+    quality_score: float,
 ) -> np.ndarray:
-    """Draw enrollment guidance overlay on the frame."""
+    """Draw enrollment guidance overlay on the frame with improved visuals."""
     frame = frame.copy()
     h, w = frame.shape[:2]
     
+    # Draw face bounding box if detected
+    if face_detected and face_bbox:
+        x, y, bw, bh = face_bbox
+        color = (0, 255, 0) if quality_score > 0.8 else (0, 255, 255)
+        cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 2)
+        
+        # Draw quality indicator bar above bbox
+        bar_width = int(bw * quality_score)
+        cv2.rectangle(frame, (x, y - 10), (x + bar_width, y - 5), color, -1)
+        cv2.rectangle(frame, (x, y - 10), (x + bw, y - 5), color, 1)
+    
+    # Draw semi-transparent info panel at top
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, 70), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+    
     # Draw pose info
-    pose_text = f"Yaw: {pose.yaw:.1f}  Pitch: {pose.pitch:.1f}"
-    cv2.putText(frame, pose_text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                0.7, (255, 255, 255), 2)
+    pose_text = f"Yaw: {pose.yaw:+6.1f}  Pitch: {pose.pitch:+5.1f}"
+    cv2.putText(frame, pose_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 
+                0.6, (255, 255, 255), 1, cv2.LINE_AA)
     
-    # Draw capture count
-    count_text = f"Captured: {len(_enrollment_frames)}/12"
-    cv2.putText(frame, count_text, (10, 60), cv2.FONT_HERSHEY_SIMPLEX,
-                0.7, (255, 255, 255), 2)
+    # Draw capture count with progress bar
+    keyframes = len(_enrollment_poses)
+    count_text = f"Keyframes: {keyframes}/12"
+    cv2.putText(frame, count_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
+                0.6, (255, 255, 255), 1, cv2.LINE_AA)
     
-    # Flash green when frame captured
-    if was_captured:
-        cv2.rectangle(frame, (0, 0), (w, h), (0, 255, 0), 10)
+    # Progress bar
+    progress_width = int((keyframes / 12) * 150)
+    cv2.rectangle(frame, (150, 40), (300, 55), (100, 100, 100), -1)
+    cv2.rectangle(frame, (150, 40), (150 + progress_width, 55), (0, 255, 0), -1)
     
-    # Draw direction arrow
+    # Flash green border when keyframe captured
+    if is_keyframe:
+        cv2.rectangle(frame, (5, 5), (w - 5, h - 5), (0, 255, 0), 8)
+        cv2.putText(frame, "CAPTURED!", (w//2 - 80, h//2), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2, (0, 255, 0), 3, cv2.LINE_AA)
+    
+    # Draw direction arrow if needed
     direction = enrollment_guide.get_next_direction()
-    if direction and direction != "center":
+    if face_detected and direction and direction != "center":
         draw_direction_arrow(frame, direction)
+    elif not face_detected:
+        # Draw "position face" message
+        cv2.putText(frame, "Position face in frame", (w//2 - 120, h//2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
     
     return frame
 
@@ -186,28 +269,52 @@ def create_coverage_plot():
     return figure
 
 
+def create_live_cloud_plot():
+    """Create live 3D point cloud visualization during enrollment."""
+    points, colors = api_client.get_enrollment_cloud()
+    
+    if points is None or len(points) == 0:
+        return visualizer.create_empty_figure("Point cloud will appear here")
+    
+    data = PointCloudData(points=points, colors=colors)
+    return visualizer.create_plotly_figure(data, f"Live Preview ({len(points)} pts)")
+
+
 def complete_enrollment(user_name: str):
     """
-    Complete the enrollment process.
-    
-    In full implementation, this finalizes with the backend.
-    For now, we just show a success message.
+    Complete the enrollment process via API client.
     """
-    if len(_enrollment_frames) < 3:
-        return "⚠️ Not enough frames captured. Please try again.", None
+    global _enrollment_active
     
-    # Placeholder: In production, backend processes frames and returns point cloud
-    status = f"✅ Enrollment complete for **{user_name}**!\n"
-    status += f"Captured {len(_enrollment_frames)} frames.\n"
-    status += f"Yaw range: {enrollment_guide.coverage.captured_yaw}\n"
-    status += f"Pitch range: {enrollment_guide.coverage.captured_pitch}"
+    keyframes = len(_enrollment_poses)
+    if keyframes < 3:
+        return "⚠️ Not enough keyframes captured. Please try again.", None
     
-    # Create a placeholder point cloud visualization
-    dummy_cloud = PointCloudData(
-        points=np.random.randn(1000, 3).astype(np.float32) * 0.1,
-        colors=(np.random.rand(1000, 3) * 255).astype(np.uint8),
-    )
-    point_cloud_fig = visualizer.create_plotly_figure(dummy_cloud, f"{user_name}'s Face Template")
+    # Finalize with API
+    result = api_client.complete_enrollment()
+    _enrollment_active = False
+    
+    if not result.get("success"):
+        return f"❌ Enrollment failed: {result.get('error', 'Unknown error')}", None
+    
+    # Format success message
+    status = f"""## ✅ Enrollment Complete!
+
+**User:** {result.get('user_name', user_name)}
+**User ID:** `{result.get('user_id', 'N/A')}`
+**Keyframes:** {result.get('keyframes_count', keyframes)}
+**Points:** {result.get('point_count', 'N/A'):,}
+
+Template saved to: `{result.get('template_path', 'storage/templates/')}`
+"""
+    
+    # Get final point cloud
+    points, colors = api_client.get_enrollment_cloud()
+    if points is not None:
+        data = PointCloudData(points=points, colors=colors)
+        point_cloud_fig = visualizer.create_plotly_figure(data, f"{user_name}'s Face Template")
+    else:
+        point_cloud_fig = visualizer.create_empty_figure("Template created")
     
     return status, point_cloud_fig
 
@@ -218,12 +325,7 @@ def complete_enrollment(user_name: str):
 
 def authenticate(frame: Optional[np.ndarray], selected_user: Optional[str]):
     """
-    Run authentication on current frame.
-    
-    In full implementation:
-    1. Capture 2-4 frames
-    2. Send to POST /authenticate endpoint
-    3. Display results
+    Run authentication via API client.
     """
     if frame is None:
         return "⚠️ No camera feed available", None
@@ -231,24 +333,25 @@ def authenticate(frame: Optional[np.ndarray], selected_user: Optional[str]):
     if not selected_user:
         return "⚠️ Please select a user to authenticate against", None
     
-    # Placeholder: Simulate authentication result
-    time.sleep(0.5)  # Simulate processing
+    # Send to API (mock or live)
+    api_result = api_client.authenticate([frame], target_user=selected_user)
     
-    simulated_result = AuthResult(
-        is_match=np.random.random() > 0.3,
-        matched_user_id="usr_001",
-        matched_user_name=selected_user,
-        final_score=np.random.uniform(0.5, 0.95),
-        geometric_score=np.random.uniform(0.4, 0.9),
-        descriptor_score=np.random.uniform(0.5, 0.95),
-        anti_spoof_passed=True,
-        processing_time_sec=np.random.uniform(0.5, 2.0),
+    # Convert API response to AuthResult for display
+    result = AuthResult(
+        is_match=api_result.is_match,
+        matched_user_id=api_result.matched_user_id,
+        matched_user_name=api_result.matched_user_name,
+        final_score=api_result.final_score,
+        geometric_score=api_result.geometric_score,
+        descriptor_score=api_result.descriptor_score,
+        anti_spoof_passed=api_result.anti_spoof_passed,
+        processing_time_sec=api_result.processing_time_ms / 1000,
     )
     
-    result_msg = auth_panel.format_result_message(simulated_result)
+    result_msg = auth_panel.format_result_message(result)
     
     # Create score visualization
-    score_fig = create_score_visualization(simulated_result)
+    score_fig = create_score_visualization(result)
     
     return result_msg, score_fig
 
@@ -345,7 +448,7 @@ def create_demo():
                 start_btn.click(
                     fn=start_enrollment,
                     inputs=[user_name_input],
-                    outputs=[webcam_feed, enrollment_status, coverage_plot],
+                    outputs=[webcam_feed, enrollment_status, coverage_plot, result_cloud],
                 )
                 
                 webcam_feed.stream(
