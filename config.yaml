@@ -1,0 +1,118 @@
+# MASt3R Face Authentication System - Configuration
+# All tunable parameters in one place
+# Version: 1.0
+
+# ============================================================
+# Frontend Configuration (CS-2)
+# ============================================================
+frontend:
+  # Gradio server settings
+  server:
+    host: "0.0.0.0"
+    port: 7860
+    share: false
+  
+  # Webcam capture settings
+  webcam:
+    width: 640
+    height: 480
+    fps: 30
+    device_id: 0
+  
+  # Enrollment UI settings
+  enrollment:
+    target_frames: 12
+    min_yaw_spread: 40.0      # degrees
+    min_pitch_spread: 20.0    # degrees
+    max_roll: 15.0            # reject frames with excessive roll
+    quality_threshold: 0.9     # minimum face detection confidence
+  
+  # Authentication UI settings
+  auth:
+    capture_frames: 3
+    frame_delay_ms: 200
+  
+  # Visualization settings
+  visualization:
+    max_points: 10000         # subsample for performance
+    point_size: 1.5
+
+# ============================================================
+# API Configuration (CS-1 defines, CS-2 consumes)
+# ============================================================
+api:
+  base_url: "http://localhost:8000"
+  endpoints:
+    enroll_ws: "/ws/enroll"
+    authenticate: "/authenticate"
+    users: "/users"
+  timeout_sec: 30
+
+# ============================================================
+# MASt3R Engine Configuration (CS-1)
+# ============================================================
+mast3r:
+  checkpoint: "naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
+  image_size: 512
+  force_fp16: true            # Mandatory on 8GB GPU
+  device: "cuda"
+
+# ============================================================
+# Face Detection Configuration (CS-1)
+# ============================================================
+face_detection:
+  model: "mediapipe"          # or "dlib"
+  min_detection_confidence: 0.9
+  min_tracking_confidence: 0.5
+  face_padding: 0.3           # padding around face bbox
+
+# ============================================================
+# Keyframe Selection Configuration (CS-1)
+# ============================================================
+keyframe:
+  target_count: 12
+  min_yaw_spread: 40.0
+  min_pitch_spread: 20.0
+  pose_novelty_threshold: 5.0  # min degrees delta for new keyframe
+  blur_threshold: 100.0        # Laplacian variance threshold
+
+# ============================================================
+# Matching Configuration (DS team tunes these)
+# ============================================================
+matching:
+  geometric_weight: 0.4       # α in score fusion
+  descriptor_weight: 0.6      # β in score fusion (α + β = 1)
+  accept_threshold: 0.65      # final score threshold for accept
+  
+  icp:
+    max_iterations: 50
+    convergence_threshold: 1e-6
+    max_correspondence_distance: 0.05
+
+# ============================================================
+# Anti-Spoofing Configuration (CS-1 builds, DS-2 tunes)
+# ============================================================
+anti_spoof:
+  enabled: true
+  depth_std_threshold: 0.003   # meters (3mm)
+  planarity_ratio_threshold: 0.05
+  confidence_mean_threshold: 0.7
+
+# ============================================================
+# Storage Configuration
+# ============================================================
+storage:
+  templates_dir: "storage/templates"
+  db_path: "storage/db.sqlite"
+
+# ============================================================
+# Logging Configuration
+# ============================================================
+logging:
+  level: "INFO"               # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# ============================================================
+# Random Seed (for reproducibility)
+# ============================================================
+seed: 42

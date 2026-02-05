@@ -1,0 +1,58 @@
+# MASt3R Face Authentication System - Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# ============================================================
+# Frontend (CS-2) - Required for UI
+# ============================================================
+gradio>=4.0.0
+opencv-python>=4.8.0
+numpy>=1.24.0
+plotly>=5.18.0
+
+# ============================================================
+# Backend API (CS-1)
+# ============================================================
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+websockets>=12.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
+
+# ============================================================
+# Core ML/3D Processing (CS-1)
+# ============================================================
+# torch>=2.0.0  # Install separately with CUDA support
+# torchvision>=0.15.0
+scipy>=1.11.0
+# open3d>=0.17.0  # For point cloud operations
+
+# ============================================================
+# Face Detection (CS-1)
+# ============================================================
+mediapipe>=0.10.0
+
+# ============================================================
+# Utilities
+# ============================================================
+pyyaml>=6.0
+pillow>=10.0.0
+tqdm>=4.66.0
+
+# ============================================================
+# Database
+# ============================================================
+# SQLite is built into Python, no extra package needed
+
+# ============================================================
+# Testing
+# ============================================================
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+
+# ============================================================
+# Notes:
+# - PyTorch: Install manually with CUDA support from pytorch.org
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# - MASt3R: Follow setup in scripts/setup_mast3r.sh
+# - Open3D: May have compatibility issues, install separately if needed
+# ============================================================
