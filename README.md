@@ -1,89 +1,165 @@
 # MASt3R Face Authentication System
 
-A Face ID-like prototype using **MASt3R** (Matching And Stereo 3D Reconstruction) for 3D face reconstruction and authentication — all from a standard RGB webcam.
+## Project Overview
 
-## Project Structure
+This is a **Face ID-like prototype** that uses MASt3R (Matching And Stereo 3D Reconstruction) for 3D face reconstruction and authentication — all from a standard RGB webcam, no depth sensor required.
 
-```
-face-auth-mast3r/
-├── frontend/                    # CS-2 Primary Ownership
-│   ├── app_gradio.py           # Main Gradio UI entry point
-│   └── components/
-│       ├── webcam_capture.py   # Webcam access + frame dispatch
-│       ├── enrollment_guide.py # Guided head rotation UI
-│       ├── auth_panel.py       # Authentication trigger + result
-│       └── visualization.py    # 3D point cloud viewer
-├── core/                        # CS-1 Primary Ownership (TODO)
-├── api/                         # CS-1 Defines, CS-2 Consumes (TODO)
-├── scripts/
-│   └── smoke_test_frontend.py  # Frontend component tests
-├── config.yaml                  # All tunable parameters
-├── requirements.txt             # Python dependencies
-└── .gitignore
-```
+**What problem does it solve?**  
+Traditional face authentication relies on 2D images, which are vulnerable to spoofing (photos, screens). By reconstructing a 3D face model during enrollment and comparing geometry + learned descriptors during authentication, we get better security and accuracy.
 
-## Quick Start (CS-2 Frontend)
+---
 
-### 1. Install Dependencies
+## Quick Start (TL;DR)
 
 ```bash
+# 1. Install dependencies
 pip install -r requirements.txt
-```
 
-### 2. Run the Gradio UI
-
-```bash
+# 2. Run the demo UI (mock mode — no backend needed)
 python -m frontend.app_gradio
+
+# 3. Open in browser
+# → http://localhost:7860
 ```
 
-The UI will be available at: **http://localhost:7860**
+That's it! The UI runs in **mock mode** by default, simulating backend responses so you can explore the full flow.
 
-### 3. Run Smoke Tests
+---
 
+## Running the Demo (Mock Mode)
+
+Mock mode lets you test the complete UI without spinning up the backend API. The frontend simulates face detection, keyframe capture, and authentication results.
+
+**Steps:**
+1. Install dependencies: `pip install -r requirements.txt`
+2. Launch the UI: `python -m frontend.app_gradio`
+3. Open **http://localhost:7860** in your browser
+4. Try the **Enrollment** tab: enter a name, click Start, and move your head slowly
+5. Try the **Authentication** tab: select a user and click Authenticate
+
+**What you'll see:**
+- Simulated face detection with bounding boxes
+- Head pose coverage tracking (yaw/pitch)
+- Keyframe capture progress
+- Mock authentication scores and match results
+
+---
+
+## Running with Real Backend (Live Mode)
+
+> ⚠️ **Work in Progress** — The backend API is not yet complete.
+
+When the FastAPI backend is ready:
+1. Start the backend: `uvicorn api.app:app --host 0.0.0.0 --port 8000`
+2. The frontend will auto-detect and switch to live mode (or manually set `ConnectionMode.LIVE` in code)
+3. Real MASt3R inference will run on GPU
+
+**Endpoints (defined but not yet implemented):**
+- WebSocket: `ws://localhost:8000/ws/enroll/{user_name}` — streaming enrollment
+- REST: `POST /authenticate` — authentication
+- REST: `GET /users` — list enrolled users
+
+---
+
+## Repository Structure
+
+```
+ai-visual-computing-pbl/
+├── frontend/                   # UI components (Gradio)
+│   ├── app_gradio.py          # Main entry point
+│   ├── api_client.py          # Backend communication (mock/live)
+│   └── components/            # Webcam, enrollment guide, auth panel, visualization
+├── scripts/
+│   └── smoke_test_frontend.py # Automated tests for frontend
+├── config.yaml                # All tunable parameters
+├── requirements.txt           # Python dependencies
+├── technical-architecure_whole.md  # Full system design (read this for deep details)
+└── CS2DS-share.md             # DS team onboarding doc
+```
+
+**Folders to be added:**
+- `core/` — MASt3R engine, face detection, template manager (CS-1)
+- `api/` — FastAPI routes and schemas (CS-1)
+- `storage/` — Enrolled templates and SQLite database (gitignored)
+
+---
+
+## Enrollment & Authentication Flow (High-Level)
+
+### Enrollment
+1. User enters their name and starts enrollment
+2. System captures ~12 keyframes as user rotates head (left, right, up, down)
+3. Frames are processed through MASt3R to build a 3D point cloud + descriptors
+4. Template is saved to disk
+
+### Authentication
+1. User selects their name and captures 2-4 frames
+2. System reconstructs a probe point cloud
+3. Probe is compared against stored template (geometric + descriptor matching)
+4. Match score determines pass/fail
+
+For full pipeline details, see `technical-architecure_whole.md`.
+
+---
+
+## Team Responsibilities
+
+| Role | Owns | Focus |
+|------|------|-------|
+| **CS-1** | `core/`, `api/` | MASt3R integration, face detection, backend API |
+| **CS-2** | `frontend/` | Gradio UI, visualization, API client |
+| **DS-1** | `core/matching/` | Geometric + descriptor matching algorithms |
+| **DS-2** | Evaluation | Anti-spoofing, accuracy metrics |
+
+---
+
+## Development Notes
+
+### Mock Backend
+The `MockBackend` class in `frontend/api_client.py` simulates:
+- Face detection (90% success rate)
+- Head pose estimation (temporal consistency)
+- Keyframe selection (every ~8 frames)
+- Point cloud generation (random face-like shape)
+- Authentication (70% match rate for demo)
+
+This lets CS-2 develop the UI independently of CS-1's backend.
+
+### Smoke Tests
+Run automated tests to verify components work:
 ```bash
 python scripts/smoke_test_frontend.py
 ```
 
-## Features (Current Status)
+Tests cover: webcam capture, enrollment guide, auth panel, visualization, and API client (mock mode).
 
-### ✅ Implemented (CS-2 Milestone 1)
-- **Gradio skeleton UI** with tabs for Enrollment, Authentication, Users, 3D Viewer
-- **Webcam capture component** with base64 encoding for API transmission
-- **Enrollment guide** with head pose coverage tracking and direction prompts
-- **Authentication panel** with result formatting and score visualization
-- **Point cloud visualizer** using Plotly for 3D rendering
-- **Configuration system** via `config.yaml`
+### Configuration
+All tunable parameters live in `config.yaml`:
+- Frontend server settings (port 7860)
+- Webcam resolution (640×480)
+- Enrollment targets (12 keyframes, yaw/pitch coverage)
+- API endpoints
 
-### 🔄 Pending (Future Milestones)
-- Connect enrollment UI to WebSocket endpoint (`ws://localhost:8000/ws/enroll`)
-- Connect authentication to REST endpoint (`POST /authenticate`)
-- Real face detection overlay (requires CS-1 backend)
-- Live 3D point cloud preview during enrollment
-- User management (list, delete) via API
+---
 
-## Team Responsibilities
+## Common Issues / Tips
 
-| Role | Primary Ownership |
-|------|-------------------|
-| **CS-1** | `core/`, `api/`, MASt3R integration, face detection |
-| **CS-2** | `frontend/`, Gradio UI, visualization components |
-| **DS-1** | `core/matching/` algorithm implementations |
-| **DS-2** | Evaluation, anti-spoofing analysis |
+| Issue | Solution |
+|-------|----------|
+| **Port 7860 already in use** | Kill the existing process or change `frontend.server.port` in `config.yaml` |
+| **Webcam not detected** | Check browser permissions; try a different `device_id` in config |
+| **Import errors** | Make sure you're running from the repo root: `python -m frontend.app_gradio` |
+| **PyTorch not found** | Install separately: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121` |
+| **Slow/no GPU** | Mock mode doesn't need GPU; live mode requires CUDA-compatible GPU with ≥8GB VRAM |
 
-## Branch Conventions
-
-```
-main
- └── develop                    ← Integration branch
-      ├── feature/cs1-*         ← CS-1 feature branches
-      ├── feature/cs2-*         ← CS-2 feature branches
-      └── feature/ds-*          ← DS feature branches
-```
+---
 
 ## Documentation
 
-- `technical-architecure_whole.md` — Full system architecture
-- `CS2DS-share.md` — DS team onboarding and interface specs
+- **`technical-architecure_whole.md`** — Full architecture, data flows, API contracts, module specs
+- **`CS2DS-share.md`** — DS team onboarding and interface specifications
+
+---
 
 ## License
 
