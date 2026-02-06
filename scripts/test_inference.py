@@ -249,7 +249,8 @@ def run_inference_test(model, image_paths, device, verbose: bool = False):
         print_status("Inference completed successfully!", "OK")
 
         # Extract and verify outputs
-        view1, view2 = output["view1"], output["view2"]
+        # pred1 contains outputs for image 1, pred2 for image 2
+        pred1, pred2 = output["pred1"], output["pred2"]
 
         # MASt3R outputs explained:
         # - pts3d: 3D point positions for each pixel (the "pointmap")
@@ -260,12 +261,12 @@ def run_inference_test(model, image_paths, device, verbose: bool = False):
         print_header("Output Shapes")
 
         outputs_to_check = [
-            ("Pointmap 1 (3D coords)", view1["pts3d"], 4, 3),
-            ("Pointmap 2 (in view1 frame)", view2["pts3d_in_other_view"], 4, 3),
-            ("Confidence 1", view1["conf"], 3, None),
-            ("Confidence 2", view2["conf"], 3, None),
-            ("Descriptors 1", view1["desc"], 4, None),
-            ("Descriptors 2", view2["desc"], 4, None),
+            ("Pointmap 1 (3D coords)", pred1["pts3d"], 4, 3),
+            ("Pointmap 2 (in view1 frame)", pred2["pts3d_in_other_view"], 4, 3),
+            ("Confidence 1", pred1["conf"], 3, None),
+            ("Confidence 2", pred2["conf"], 3, None),
+            ("Descriptors 1", pred1["desc"], 4, None),
+            ("Descriptors 2", pred2["desc"], 4, None),
         ]
 
         all_passed = True
@@ -291,16 +292,16 @@ def run_inference_test(model, image_paths, device, verbose: bool = False):
         if verbose:
             # Print more detailed statistics
             print_header("Output Statistics")
-            pts3d = view1["pts3d"].cpu().numpy()
+            pts3d = pred1["pts3d"].cpu().numpy()
             print_status(f"Point cloud range: X[{pts3d[...,0].min():.2f}, {pts3d[...,0].max():.2f}]", "INFO")
             print_status(f"                   Y[{pts3d[...,1].min():.2f}, {pts3d[...,1].max():.2f}]", "INFO")
             print_status(f"                   Z[{pts3d[...,2].min():.2f}, {pts3d[...,2].max():.2f}]", "INFO")
 
-            conf = view1["conf"].cpu().numpy()
+            conf = pred1["conf"].cpu().numpy()
             print_status(f"Confidence range: [{conf.min():.3f}, {conf.max():.3f}]", "INFO")
             print_status(f"Confidence mean: {conf.mean():.3f}", "INFO")
 
-            desc = view1["desc"]
+            desc = pred1["desc"]
             print_status(f"Descriptor dimension: {desc.shape[-1]}", "INFO")
 
         return all_passed
