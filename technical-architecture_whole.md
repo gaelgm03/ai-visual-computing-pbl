@@ -1013,6 +1013,14 @@ Google Drive (shared folder — large binary files only, NOT code)
     │   │   ├── frame_001.jpg
     │   │   └── ...
     │   └── bob/
+    ├── datasets/                  # ← Added on 202602026: DS team uploads public datasets here
+    │   └── <dataset_name>/        #   e.g., "multi_pie" or "feret"
+    │       ├── subject_001/
+    │       │   ├── view_01.jpg
+    │       │   ├── view_02.jpg
+    │       │   └── ...
+    │       └── subject_002/
+    │           └── ...
     ├── mast3r_outputs/            # Pre-computed by CS-1 on RTX 5070
     │   ├── alice_enrollment.npz   # {point_cloud, descriptors, confidence}
     │   ├── alice_probe_01.npz
