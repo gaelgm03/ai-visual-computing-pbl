@@ -8,7 +8,7 @@ Main components:
     - config: Configuration loading and management
     - face_detector: Face detection using MediaPipe
     - keyframe_selector: Optimal frame selection for enrollment
-    - mast3r_engine: MASt3R model wrapper (CS-1 Phase 2)
+    - mast3r_engine: MASt3R model wrapper for 3D reconstruction
     - template_manager: Face template storage (CS-1 Phase 2)
     - matching: Matching algorithms (DS team implements)
 
@@ -16,6 +16,7 @@ Usage:
     from core.config import get_config
     from core.face_detector import FaceDetector
     from core.keyframe_selector import KeyframeSelector
+    from core.mast3r_engine import MASt3REngine, get_engine
 """
 
 from core.config import (
@@ -36,6 +37,13 @@ from core.keyframe_selector import (
     CoverageStatus,
 )
 
+from core.mast3r_engine import (
+    MASt3REngine,
+    PairwiseResult,
+    MultiViewResult,
+    get_engine,
+)
+
 __all__ = [
     # Configuration
     "get_config",
@@ -52,4 +60,9 @@ __all__ = [
     "KeyframeSelector",
     "KeyframeCandidate",
     "CoverageStatus",
+    # MASt3R Engine
+    "MASt3REngine",
+    "PairwiseResult",
+    "MultiViewResult",
+    "get_engine",
 ]
