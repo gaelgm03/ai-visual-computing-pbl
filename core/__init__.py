@@ -44,6 +44,13 @@ from core.mast3r_engine import (
     get_engine,
 )
 
+from core.template_manager import (
+    TemplateManager,
+    FaceTemplate,
+    get_template_manager,
+    generate_user_id,
+)
+
 __all__ = [
     # Configuration
     "get_config",
@@ -65,4 +72,9 @@ __all__ = [
     "PairwiseResult",
     "MultiViewResult",
     "get_engine",
+    # Template Manager
+    "TemplateManager",
+    "FaceTemplate",
+    "get_template_manager",
+    "generate_user_id",
 ]
