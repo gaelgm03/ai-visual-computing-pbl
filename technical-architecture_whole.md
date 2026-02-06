@@ -1309,14 +1309,10 @@ Run these cells at the **start of every Colab session**. The Colab runtime is ep
 # ============================================================
 # Cell 1: GPU Check + Google Drive Mount
 # ============================================================
-import torch, os
+# Check GPU availability first
+!nvidia-smi
 
-if not torch.cuda.is_available():
-    raise RuntimeError("No GPU detected. Go to Runtime > Change runtime type > T4 GPU")
-
-gpu_name = torch.cuda.get_device_name(0)
-vram_gb = torch.cuda.get_device_properties(0).total_mem / 1e9
-print(f"✅ GPU: {gpu_name} ({vram_gb:.1f} GB VRAM)")
+import os
 
 from google.colab import drive
 drive.mount('/content/drive')
@@ -1331,79 +1327,117 @@ print(f"✅ Shared data dir: {SHARED_DIR}")
 
 ```python
 # ============================================================
-# Cell 2: Clone YOUR team's GitHub repo (source of truth for code)
+# Cell 2: Install PyTorch with CUDA FIRST (before other dependencies)
 # ============================================================
-REPO_URL = "https://github.com/your-team/face-auth-mast3r.git"  # ← UPDATE THIS
-BRANCH   = "develop"  # or your feature branch
+# This must come before pip install -r requirements.txt to ensure
+# proper CUDA support is installed.
+!pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-!git clone {REPO_URL} /content/repo 2>/dev/null || echo "Already cloned"
-%cd /content/repo
+import torch
+if not torch.cuda.is_available():
+    raise RuntimeError("No GPU detected. Go to Runtime > Change runtime type > T4 GPU")
+
+gpu_name = torch.cuda.get_device_name(0)
+vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+print(f"✅ GPU: {gpu_name} ({vram_gb:.1f} GB VRAM)")
+print(f"✅ PyTorch CUDA: {torch.version.cuda}")
+```
+
+```python
+# ============================================================
+# Cell 3: Clone GitHub repo (clean slate every session)
+# ============================================================
+REPO_URL = "https://github.com/gaelgm03/ai-visual-computing-pbl.git"
+BRANCH   = "main"  # or "develop" or your feature branch
+
+%cd /content
+!rm -rf ai-visual-computing-pbl 2>/dev/null
+!git clone --depth 1 {REPO_URL}
+%cd ai-visual-computing-pbl
+
 !git fetch origin
 !git checkout {BRANCH}
-!git pull origin {BRANCH}
 
 # Configure git identity (needed for commits)
 !git config user.email "your-email@example.com"   # ← UPDATE THIS
 !git config user.name "Your Name"                  # ← UPDATE THIS
 
-print(f"✅ Repo ready at /content/repo on branch: {BRANCH}")
+print(f"✅ Repo ready at /content/ai-visual-computing-pbl on branch: {BRANCH}")
 ```
 
 ```python
 # ============================================================
-# Cell 3: Symlink large binary data from Drive into repo
+# Cell 4: Install project dependencies
+# ============================================================
+!pip install -r requirements.txt
+print("✅ Project dependencies installed")
+```
+
+```python
+# ============================================================
+# Cell 5: Symlink large binary data from Drive into repo
 #          (These files are gitignored — they live on Drive, not GitHub)
 # ============================================================
 import os
 
-# Model checkpoint
-os.makedirs("/content/repo/checkpoints", exist_ok=True)
-!ln -sf {SHARED_DIR}/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
-        /content/repo/checkpoints/
+REPO_DIR = "/content/ai-visual-computing-pbl"
+SHARED_DIR = "/content/drive/MyDrive/face-auth-data"
 
-# Pre-computed MASt3R outputs (for DS team to work without GPU)
-!ln -sf {SHARED_DIR}/mast3r_outputs /content/repo/data_shared
+# Create directories
+os.makedirs(f"{REPO_DIR}/checkpoints/mast3r", exist_ok=True)
+os.makedirs(f"{REPO_DIR}/storage", exist_ok=True)
+
+# Symlink model checkpoints
+!ln -sf {SHARED_DIR}/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth \
+        {REPO_DIR}/checkpoints/mast3r/
+
+# Symlink raw captures storage
+!ln -sf {SHARED_DIR}/raw_captures {REPO_DIR}/storage/raw_captures
+
+# Symlink pre-computed MASt3R outputs (for DS team)
+!ln -sf {SHARED_DIR}/mast3r_outputs {REPO_DIR}/data_shared
 
 print("✅ Drive data symlinked into repo")
 ```
 
 ```python
 # ============================================================
-# Cell 4: Install MASt3R dependencies (~3-5 min, needed every session)
+# Cell 6: (Optional) Install MASt3R dependencies for full pipeline
+#          Skip this cell if only running frontend UI
 # ============================================================
 %%bash
-cd /content/repo/third_party/mast3r 2>/dev/null || {
-    # If submodule not initialized, clone standalone
-    cd /content
-    if [ ! -d "mast3r" ]; then
-        git clone --recursive https://github.com/naver/mast3r.git
-    fi
-    cd mast3r
-}
+cd /content
+if [ ! -d "mast3r" ]; then
+    echo "Cloning MASt3R repository..."
+    git clone --recursive https://github.com/naver/mast3r.git
+fi
+cd mast3r
 pip install -q -r requirements.txt
 pip install -q -r dust3r/requirements.txt
 
 # Optional: compile RoPE CUDA kernels
 cd dust3r/croco/models/curope/
 python setup.py build_ext --inplace 2>/dev/null || echo "RoPE compile skipped (non-critical)"
+echo "✅ MASt3R dependencies installed"
 ```
 
 ```python
 # ============================================================
-# Cell 5: Configure Python path + Load MASt3R model
+# Cell 7: Configure Python path + Load MASt3R model
+#          Skip this cell if only running frontend UI
 # ============================================================
 import sys
+import os
+import torch
 
-# Prefer the submodule inside repo; fall back to standalone clone
-if os.path.exists("/content/repo/third_party/mast3r"):
-    sys.path.insert(0, "/content/repo/third_party/mast3r")
-    sys.path.insert(0, "/content/repo/third_party/mast3r/dust3r")
-else:
-    sys.path.insert(0, "/content/mast3r")
-    sys.path.insert(0, "/content/mast3r/dust3r")
+REPO_DIR = "/content/ai-visual-computing-pbl"
 
-# Also add our own project to path
-sys.path.insert(0, "/content/repo")
+# Add MASt3R to path
+sys.path.insert(0, "/content/mast3r")
+sys.path.insert(0, "/content/mast3r/dust3r")
+
+# Add our project to path
+sys.path.insert(0, REPO_DIR)
 
 from mast3r.model import AsymmetricMASt3R
 
@@ -1417,8 +1451,18 @@ print("✅ MASt3R model loaded")
 
 ```python
 # ============================================================
-# Cell 6: Load Pre-computed Data (for DS team — no GPU needed)
-#          DS members can skip Cells 4-5 and work directly with
+# Cell 8: Run Frontend UI (share=True for Colab public URL)
+#          This launches the Gradio demo with a shareable link
+# ============================================================
+%cd /content/ai-visual-computing-pbl
+!python -m frontend.app_gradio
+# The app will output a public URL like: https://xxxxx.gradio.live
+```
+
+```python
+# ============================================================
+# Cell 9: Load Pre-computed Data (for DS team — no GPU needed)
+#          DS members can skip Cells 6-7 and work directly with
 #          .npz files exported by CS-1.
 # ============================================================
 import numpy as np
@@ -1443,7 +1487,7 @@ def load_template(user_name: str) -> dict:
 # ============================================================
 # ⚠️  BEFORE SESSION ENDS: Push your changes to GitHub!
 # ============================================================
-# %cd /content/repo
+# %cd /content/ai-visual-computing-pbl
 # !git add -A
 # !git commit -m "feat: your commit message here"
 # !git push origin {BRANCH}
