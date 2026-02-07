@@ -170,6 +170,39 @@ def get_storage_config() -> Dict[str, Any]:
     return get_section("storage")
 
 
+def get_api_config() -> Dict[str, Any]:
+    """Get API configuration."""
+    return get_section("api")
+
+
+def get_server_config() -> Dict[str, Any]:
+    """
+    Get server configuration for the API.
+
+    Returns:
+        Dict with host and port for the API server.
+    """
+    api_config = get_api_config()
+    base_url = api_config.get("base_url", "http://localhost:8000")
+
+    # Parse host and port from base_url
+    # Format: http://host:port
+    host = "0.0.0.0"
+    port = 8000
+
+    try:
+        url_part = base_url.split("//")[-1]  # Remove http:// or https://
+        if ":" in url_part:
+            host_part, port_str = url_part.rsplit(":", 1)
+            port = int(port_str.rstrip("/"))
+            if host_part != "localhost":
+                host = host_part
+    except (ValueError, IndexError):
+        pass
+
+    return {"host": host, "port": port}
+
+
 if __name__ == "__main__":
     # Quick test of the config loading
     print("Testing configuration loader...")
