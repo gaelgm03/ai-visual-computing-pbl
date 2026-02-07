@@ -58,6 +58,19 @@ mast3r:
   device: "cuda"
 
 # ============================================================
+# Global Alignment Configuration (CS-1)
+# Uses MASt3R-SfM's sparse_global_alignment for coordinate unification
+# ============================================================
+global_alignment:
+  enabled: true               # Use global alignment (recommended)
+  subsample: 8                # Subsampling factor for correspondences
+  lr1: 0.07                   # Learning rate for coarse alignment
+  niter1: 300                 # Iterations for coarse alignment
+  lr2: 0.01                   # Learning rate for refinement
+  niter2: 300                 # Iterations for refinement
+  cache_dir: "storage/alignment_cache"  # Cache for intermediate results
+
+# ============================================================
 # Face Detection Configuration (CS-1)
 # ============================================================
 face_detection:
@@ -75,6 +88,8 @@ keyframe:
   min_pitch_spread: 20.0
   pose_novelty_threshold: 5.0  # min degrees delta for new keyframe
   blur_threshold: 100.0        # Laplacian variance threshold
+  auto_export: true            # Auto-save keyframes when target_count reached
+  export_dir: "storage/demo_keyframes"
 
 # ============================================================
 # Matching Configuration (DS team tunes these)

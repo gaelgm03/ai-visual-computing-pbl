@@ -24,6 +24,7 @@ Controls:
     - Press 'q' to quit
     - Press 'r' to reset keyframe collection
     - Press 's' to save current frame
+    - Press 'e' to export keyframes for WSL2 reconstruction
     - Press 'm' to toggle mesh display
     - Press 'a' to toggle all landmarks display
 
@@ -34,7 +35,9 @@ import cv2
 import numpy as np
 import time
 import sys
+import json
 from pathlib import Path
+from typing import List
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
@@ -164,7 +167,8 @@ def draw_head_pose_axes(frame: np.ndarray, detection: FaceDetection):
 
 
 def draw_info_panel(frame: np.ndarray, detection: FaceDetection,
-                    status: CoverageStatus, fps: float, keyframe_captured: bool):
+                    status: CoverageStatus, fps: float, keyframe_captured: bool,
+                    target_count: int = 12):
     """
     Draw information panel on the frame.
     """
@@ -182,12 +186,12 @@ def draw_info_panel(frame: np.ndarray, detection: FaceDetection,
                 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
     # Keyframe count and coverage
-    count_text = f"Keyframes: {status.total_frames}/12"
+    count_text = f"Keyframes: {status.total_frames}/{target_count}"
     cv2.putText(frame, count_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
     # Progress bar
-    progress = status.total_frames / 12
+    progress = status.total_frames / target_count
     bar_width = 150
     bar_x = 160
     cv2.rectangle(frame, (bar_x, 40), (bar_x + bar_width, 55), (100, 100, 100), -1)
@@ -241,6 +245,66 @@ def draw_no_face_message(frame: np.ndarray):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 1, cv2.LINE_AA)
 
 
+def draw_enrollment_complete(frame: np.ndarray, n_keyframes: int, countdown: float):
+    """Draw enrollment complete message."""
+    h, w = frame.shape[:2]
+
+    # Dark overlay
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (0, 0), (w, h), (0, 80, 0), -1)
+    cv2.addWeighted(overlay, 0.7, frame, 0.3, 0, frame)
+
+    # Success message
+    cv2.putText(frame, "ENROLLMENT COMPLETE", (w//2 - 200, h//2 - 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3, cv2.LINE_AA)
+
+    cv2.putText(frame, f"{n_keyframes} keyframes saved", (w//2 - 100, h//2 + 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+
+    cv2.putText(frame, "Run 3D reconstruction on WSL2:", (w//2 - 160, h//2 + 50),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+
+    cv2.putText(frame, "python scripts/demo_enrollment.py --skip-capture",
+                (w//2 - 220, h//2 + 80),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (100, 255, 100), 1, cv2.LINE_AA)
+
+    # Countdown
+    cv2.putText(frame, f"Closing in {countdown:.0f}s...", (w//2 - 80, h - 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+
+
+def export_keyframes(keyframe_candidates: List[KeyframeCandidate], output_dir: Path):
+    """
+    Export keyframes in a format compatible with demo_enrollment.py --skip-capture.
+
+    Creates:
+        output_dir/keyframe_00.jpg
+        output_dir/keyframe_01.jpg
+        ...
+        output_dir/metadata.json
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for i, kf in enumerate(keyframe_candidates):
+        img_path = output_dir / f"keyframe_{i:02d}.jpg"
+        cv2.imwrite(str(img_path), kf.frame)
+
+    # Save metadata in the format expected by demo_enrollment.py
+    metadata = {
+        "count": len(keyframe_candidates),
+        "poses": [list(kf.head_pose) for kf in keyframe_candidates],
+        "quality_scores": [kf.quality_score for kf in keyframe_candidates],
+    }
+
+    meta_path = output_dir / "metadata.json"
+    with open(meta_path, 'w') as f:
+        json.dump(metadata, f, indent=2)
+
+    print(f"\nExported {len(keyframe_candidates)} keyframes to {output_dir}")
+    print("To run 3D reconstruction on WSL2:")
+    print(f"  python scripts/demo_enrollment.py --skip-capture")
+
+
 def main():
     """Main demo function."""
     print("=" * 60)
@@ -251,6 +315,7 @@ def main():
     print("  q - Quit")
     print("  r - Reset keyframe collection")
     print("  s - Save current frame")
+    print("  e - Export keyframes (for WSL2 reconstruction)")
     print("  m - Toggle mesh display")
     print("  a - Toggle all landmarks")
     print()
@@ -287,12 +352,24 @@ def main():
     print()
     print("Starting live demo... Press 'q' to quit.")
 
+    # Auto-export settings from config
+    auto_export = keyframe_config.get("auto_export", False)
+    export_dir_str = keyframe_config.get("export_dir", "storage/demo_keyframes")
+    export_dir = project_root / export_dir_str
+    target_count = keyframe_config.get("target_count", 12)
+
+    if auto_export:
+        print(f"Auto-export enabled: will save after {target_count} keyframes")
+
     # State
     keyframe_candidates = []
     show_mesh = True
     show_all_landmarks = False
     last_keyframe_time = 0
     keyframe_flash_duration = 0.3
+    enrollment_complete = False
+    enrollment_complete_time = 0
+    auto_close_delay = 5.0  # seconds to wait before auto-closing
 
     # FPS calculation
     fps_start_time = time.time()
@@ -308,6 +385,18 @@ def main():
 
             # Mirror the frame for more intuitive interaction
             frame = cv2.flip(frame, 1)
+
+            # Check if enrollment is complete (show completion screen)
+            if enrollment_complete:
+                elapsed_since_complete = time.time() - enrollment_complete_time
+                countdown = auto_close_delay - elapsed_since_complete
+                if countdown <= 0:
+                    print("Auto-closing...")
+                    break
+                draw_enrollment_complete(frame, len(keyframe_candidates), countdown)
+                cv2.imshow("Face Detection Demo - CS-1", frame)
+                cv2.waitKey(1)
+                continue
 
             # Update FPS
             fps_frame_count += 1
@@ -353,15 +442,22 @@ def main():
                     )
                     keyframe_candidates.append(candidate)
                     last_keyframe_time = time.time()
-                    print(f"Keyframe {len(keyframe_candidates)} captured! "
+                    print(f"Keyframe {len(keyframe_candidates)}/{target_count} captured! "
                           f"Pose: yaw={detection.head_pose[0]:.1f}, "
                           f"pitch={detection.head_pose[1]:.1f}")
+
+                    # Auto-export when target count reached
+                    if auto_export and len(keyframe_candidates) >= target_count:
+                        print(f"\nTarget count ({target_count}) reached! Auto-exporting...")
+                        export_keyframes(keyframe_candidates, export_dir)
+                        enrollment_complete = True
+                        enrollment_complete_time = time.time()
 
                 # Get coverage status
                 status = selector.get_coverage_status(keyframe_candidates)
 
                 # Draw info panel
-                draw_info_panel(frame, detection, status, current_fps, keyframe_captured)
+                draw_info_panel(frame, detection, status, current_fps, keyframe_captured, target_count)
             else:
                 # No face detected
                 draw_no_face_message(frame)
@@ -394,6 +490,12 @@ def main():
             elif key == ord('a'):
                 show_all_landmarks = not show_all_landmarks
                 print(f"All landmarks: {'ON' if show_all_landmarks else 'OFF'}")
+            elif key == ord('e'):
+                if keyframe_candidates:
+                    output_dir = project_root / "storage" / "demo_keyframes"
+                    export_keyframes(keyframe_candidates, output_dir)
+                else:
+                    print("No keyframes to export! Capture some first.")
 
     finally:
         cap.release()

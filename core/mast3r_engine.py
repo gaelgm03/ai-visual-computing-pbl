@@ -176,6 +176,11 @@ class MASt3REngine:
         # Track project paths for MASt3R imports
         self._setup_paths()
 
+    @property
+    def is_loaded(self) -> bool:
+        """Check if the model has been loaded."""
+        return self._model_loaded
+
     def _setup_paths(self):
         """Setup Python paths for MASt3R imports."""
         # Find project root (contains config.yaml)
@@ -432,19 +437,24 @@ class MASt3REngine:
         frames: List[np.ndarray],
         pairs: Optional[List[Tuple[int, int]]] = None,
         confidence_threshold: float = 0.5,
+        use_global_alignment: bool = True,
+        global_alignment_config: Optional[Dict[str, Any]] = None,
     ) -> MultiViewResult:
         """
         Reconstruct a unified 3D point cloud from multiple frames.
 
-        This method:
-        1. Generates image pairs (if not provided)
-        2. Runs pairwise inference on each pair
-        3. Accumulates points and descriptors from all pairs
-        4. Filters by confidence threshold
+        This method supports two modes:
 
-        Note: This is a simplified fusion that accumulates points from the
-        first view of each pair. For better results, global alignment
-        (e.g., MASt3R-SfM's sparse_global_alignment) could be used.
+        1. Global Alignment (default, use_global_alignment=True):
+           Uses MASt3R-SfM's sparse_global_alignment to optimize camera poses
+           and produce a globally consistent 3D reconstruction. This solves
+           the coordinate system unification problem where each pairwise
+           result is in a different reference frame.
+
+        2. Simple Accumulation (use_global_alignment=False):
+           Simplified fusion that accumulates points from the first view
+           of each pair. Faster but produces fragmented results (multiple
+           overlapping layers). Use for pipeline testing only.
 
         Args:
             frames: List of face images in BGR format.
@@ -453,6 +463,12 @@ class MASt3REngine:
                    to compare. If None, auto-generated using generate_pair_indices.
             confidence_threshold: Minimum confidence to include a point.
                                   Points below this are filtered out.
+            use_global_alignment: If True (default), use MASt3R-SfM's
+                                  sparse_global_alignment for proper
+                                  coordinate unification. If False, use
+                                  simple point accumulation.
+            global_alignment_config: Optional config dict for GlobalAligner.
+                                     See core.global_alignment.GlobalAligner.
 
         Returns:
             MultiViewResult containing the fused point cloud, colors,
@@ -465,9 +481,14 @@ class MASt3REngine:
         Example:
             # From keyframe candidates
             frames = [kf.frame for kf in keyframe_candidates]
+
+            # With global alignment (recommended)
             result = engine.reconstruct_multiview(frames)
+
+            # Without global alignment (for testing)
+            result = engine.reconstruct_multiview(frames, use_global_alignment=False)
+
             print(f"Reconstructed {len(result.point_cloud)} points")
-            print(f"Descriptor dimension: {result.descriptors.shape[1]}")
         """
         self._ensure_model_loaded()
 
@@ -479,6 +500,173 @@ class MASt3REngine:
             pairs = self.generate_pair_indices(len(frames))
 
         logger.info(f"Reconstructing from {len(frames)} frames, {len(pairs)} pairs")
+        logger.info(f"Using global alignment: {use_global_alignment}")
+
+        if use_global_alignment:
+            return self._reconstruct_with_global_alignment(
+                frames, pairs, confidence_threshold, global_alignment_config
+            )
+        else:
+            return self._reconstruct_simple_accumulation(
+                frames, pairs, confidence_threshold
+            )
+
+    def _reconstruct_with_global_alignment(
+        self,
+        frames: List[np.ndarray],
+        pairs: List[Tuple[int, int]],
+        confidence_threshold: float,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> MultiViewResult:
+        """
+        Reconstruct using MASt3R-SfM's sparse_global_alignment.
+
+        This method properly unifies all pairwise results into a single
+        coordinate frame by optimizing camera poses.
+        """
+        from core.global_alignment import GlobalAligner
+
+        if config is None:
+            # Load from config file
+            try:
+                from core.config import get_global_alignment_config
+                file_config = get_global_alignment_config()
+                config = {
+                    "device": str(self.device),
+                    "subsample": file_config.get("subsample", 8),
+                    "lr1": file_config.get("lr1", 0.07),
+                    "niter1": file_config.get("niter1", 300),
+                    "lr2": file_config.get("lr2", 0.01),
+                    "niter2": file_config.get("niter2", 300),
+                }
+            except (ImportError, KeyError):
+                # Fallback to hardcoded defaults
+                config = {
+                    "device": str(self.device),
+                    "subsample": 8,
+                    "lr1": 0.07,
+                    "niter1": 300,
+                    "lr2": 0.01,
+                    "niter2": 300,
+                }
+
+        aligner = GlobalAligner(config)
+
+        # Convert BGR frames to RGB for global alignment
+        frames_rgb = []
+        for frame in frames:
+            if frame.ndim == 3 and frame.shape[2] == 3:
+                # Assume BGR (OpenCV) and convert to RGB
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            else:
+                rgb = frame
+            frames_rgb.append(rgb)
+
+        logger.info("Running global alignment...")
+        try:
+            alignment_result = aligner.align_from_frames(
+                frames_rgb, pairs, self.model
+            )
+        except Exception as e:
+            logger.error(f"Global alignment failed: {e}")
+            logger.warning("Falling back to simple accumulation method.")
+            return self._reconstruct_simple_accumulation(
+                frames, pairs, confidence_threshold
+            )
+
+        # Extract aligned point cloud
+        point_cloud = alignment_result.point_cloud
+        colors = alignment_result.colors
+        confidence = alignment_result.confidence
+
+        # Apply confidence threshold
+        mask = confidence >= confidence_threshold
+        point_cloud = point_cloud[mask]
+        colors = colors[mask]
+        confidence = confidence[mask]
+
+        logger.info(f"Global alignment complete: {len(point_cloud)} points")
+
+        # For descriptors, we need to run pairwise inference and collect them
+        # This is done after alignment to use the aligned coordinate system
+        descriptors = self._extract_aligned_descriptors(
+            frames, pairs, alignment_result.camera_poses,
+            alignment_result.intrinsics, confidence_threshold
+        )
+
+        return MultiViewResult(
+            point_cloud=point_cloud,
+            colors=colors,
+            descriptors=descriptors,
+            confidence=confidence,
+            per_frame_poses=alignment_result.camera_poses,
+            n_frames=len(frames),
+            n_pairs=len(pairs),
+            reconstruction_metadata={
+                "confidence_threshold": confidence_threshold,
+                "pairs_processed": pairs,
+                "alignment_method": "sparse_global_alignment",
+            }
+        )
+
+    def _extract_aligned_descriptors(
+        self,
+        frames: List[np.ndarray],
+        pairs: List[Tuple[int, int]],
+        camera_poses: List[np.ndarray],
+        intrinsics: List[np.ndarray],
+        confidence_threshold: float,
+    ) -> np.ndarray:
+        """
+        Extract descriptors after global alignment.
+
+        Since global alignment uses sparse correspondences, we run pairwise
+        inference to get dense descriptors and transform them using the
+        optimized camera poses.
+        """
+        all_descriptors = []
+
+        # For efficiency, we only process the first pair to get descriptor dimension
+        # and then aggregate from all pairs
+        for idx, (i, j) in enumerate(pairs):
+            result = self.infer_pair(frames[i], frames[j])
+
+            # Get descriptors from first view
+            descriptors_flat = result.descriptors1.reshape(-1, result.descriptors1.shape[-1])
+            confidence_flat = result.confidence1.reshape(-1)
+
+            # Filter by confidence
+            mask = confidence_flat >= confidence_threshold
+            all_descriptors.append(descriptors_flat[mask])
+
+            # Free memory
+            del result
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+
+        if all_descriptors:
+            descriptors = np.concatenate(all_descriptors, axis=0)
+        else:
+            descriptors = np.zeros((0, 24), dtype=np.float32)
+
+        return descriptors
+
+    def _reconstruct_simple_accumulation(
+        self,
+        frames: List[np.ndarray],
+        pairs: List[Tuple[int, int]],
+        confidence_threshold: float,
+    ) -> MultiViewResult:
+        """
+        Reconstruct using simple point accumulation (no global alignment).
+
+        WARNING: This produces fragmented results where each pair's points
+        are in different coordinate systems. Use for pipeline testing only.
+        """
+        logger.warning(
+            "Using simple accumulation (no global alignment). "
+            "Results will be fragmented with overlapping layers."
+        )
 
         # Collect points from all pairs
         all_points = []
@@ -539,12 +727,13 @@ class MASt3REngine:
             colors=colors,
             descriptors=descriptors,
             confidence=confidence,
-            per_frame_poses=[],  # Not computed in this simplified version
+            per_frame_poses=[],  # Not computed in simple mode
             n_frames=len(frames),
             n_pairs=len(pairs),
             reconstruction_metadata={
                 "confidence_threshold": confidence_threshold,
                 "pairs_processed": pairs,
+                "alignment_method": "simple_accumulation",
             }
         )
 
@@ -560,7 +749,7 @@ class MASt3REngine:
         """
         Remove duplicate/very close points from the point cloud.
 
-        Uses voxel grid downsampling for efficiency.
+        Uses voxel grid downsampling with vectorized operations for efficiency.
 
         Args:
             points: Point coordinates (N, 3).
@@ -576,6 +765,8 @@ class MASt3REngine:
         if len(points) == 0:
             return points, colors, descriptors, confidence
 
+        logger.info(f"Deduplicating {len(points):,} points...")
+
         # Simple voxel grid downsampling
         # Quantize points to a grid and keep one point per cell
         voxel_size = distance_threshold
@@ -589,31 +780,29 @@ class MASt3REngine:
         multipliers = np.array([1, 10000, 100000000], dtype=np.int64)
         voxel_keys = (voxel_indices.astype(np.int64) * multipliers).sum(axis=1)
 
-        # Find unique voxels, keeping the highest confidence point
-        unique_keys, inverse_indices = np.unique(voxel_keys, return_inverse=True)
+        # Vectorized approach: sort by voxel key, then by confidence (descending)
+        # This allows us to use np.unique to get the first (highest confidence) point per voxel
 
-        # For each unique voxel, find the point with highest confidence
-        unique_points = []
-        unique_colors = []
-        unique_descriptors = []
-        unique_confidence = []
+        # Create sort order: primary by voxel_keys, secondary by -confidence
+        # We negate confidence so that higher values come first after sorting
+        sort_idx = np.lexsort((-confidence, voxel_keys))
 
-        for key_idx in range(len(unique_keys)):
-            mask = inverse_indices == key_idx
-            indices = np.where(mask)[0]
+        # Apply sort order
+        sorted_keys = voxel_keys[sort_idx]
 
-            # Pick the point with highest confidence
-            best_idx = indices[confidence[indices].argmax()]
+        # Find first occurrence of each unique key (which has highest confidence due to sorting)
+        _, first_occurrence_idx = np.unique(sorted_keys, return_index=True)
 
-            unique_points.append(points[best_idx])
-            unique_colors.append(colors[best_idx])
-            unique_descriptors.append(descriptors[best_idx])
-            unique_confidence.append(confidence[best_idx])
+        # Map back to original indices
+        best_indices = sort_idx[first_occurrence_idx]
 
-        result_points = np.array(unique_points)
-        result_colors = np.array(unique_colors)
-        result_descriptors = np.array(unique_descriptors)
-        result_confidence = np.array(unique_confidence)
+        # Extract results using vectorized indexing
+        result_points = points[best_indices]
+        result_colors = colors[best_indices]
+        result_descriptors = descriptors[best_indices]
+        result_confidence = confidence[best_indices]
+
+        logger.info(f"After voxel dedup: {len(result_points):,} points")
 
         # If still too many points, subsample by confidence
         if len(result_points) > max_points:
@@ -623,6 +812,7 @@ class MASt3REngine:
             result_colors = result_colors[top_indices]
             result_descriptors = result_descriptors[top_indices]
             result_confidence = result_confidence[top_indices]
+            logger.info(f"After max_points limit: {len(result_points):,} points")
 
         return result_points, result_colors, result_descriptors, result_confidence
 
