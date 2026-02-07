@@ -294,6 +294,10 @@ class MASt3REngine:
         Reconstruct a unified 3D point cloud from multiple frames.
         Uses MASt3R pairwise inference + global alignment.
 
+        > **@2026-02-07 Pipeline Test**: Currently simplified implementation
+        > (no global alignment, simple accumulation of pairwise results).
+        > May be reverted or enhanced later.
+
         Args:
             frames: List of RGB face crops.
             pairs: Explicit pairing strategy. If None, uses sequential +
@@ -620,6 +624,10 @@ with torch.no_grad():
 ```
 
 ### 7.4 Global Alignment
+
+> **@2026-02-07 Pipeline Test**: Current implementation uses simplified
+> point accumulation for end-to-end pipeline validation. Full global
+> alignment (as described below) is planned for a future phase.
 
 Uses MASt3R-SfM's `sparse_global_alignment`:
 - Input: all pairwise pointmaps and their confidence maps

@@ -176,6 +176,11 @@ class MASt3REngine:
         # Track project paths for MASt3R imports
         self._setup_paths()
 
+    @property
+    def is_loaded(self) -> bool:
+        """Check if the model has been loaded."""
+        return self._model_loaded
+
     def _setup_paths(self):
         """Setup Python paths for MASt3R imports."""
         # Find project root (contains config.yaml)
@@ -560,7 +565,7 @@ class MASt3REngine:
         """
         Remove duplicate/very close points from the point cloud.
 
-        Uses voxel grid downsampling for efficiency.
+        Uses voxel grid downsampling with vectorized operations for efficiency.
 
         Args:
             points: Point coordinates (N, 3).
@@ -576,6 +581,8 @@ class MASt3REngine:
         if len(points) == 0:
             return points, colors, descriptors, confidence
 
+        logger.info(f"Deduplicating {len(points):,} points...")
+
         # Simple voxel grid downsampling
         # Quantize points to a grid and keep one point per cell
         voxel_size = distance_threshold
@@ -589,31 +596,29 @@ class MASt3REngine:
         multipliers = np.array([1, 10000, 100000000], dtype=np.int64)
         voxel_keys = (voxel_indices.astype(np.int64) * multipliers).sum(axis=1)
 
-        # Find unique voxels, keeping the highest confidence point
-        unique_keys, inverse_indices = np.unique(voxel_keys, return_inverse=True)
+        # Vectorized approach: sort by voxel key, then by confidence (descending)
+        # This allows us to use np.unique to get the first (highest confidence) point per voxel
 
-        # For each unique voxel, find the point with highest confidence
-        unique_points = []
-        unique_colors = []
-        unique_descriptors = []
-        unique_confidence = []
+        # Create sort order: primary by voxel_keys, secondary by -confidence
+        # We negate confidence so that higher values come first after sorting
+        sort_idx = np.lexsort((-confidence, voxel_keys))
 
-        for key_idx in range(len(unique_keys)):
-            mask = inverse_indices == key_idx
-            indices = np.where(mask)[0]
+        # Apply sort order
+        sorted_keys = voxel_keys[sort_idx]
 
-            # Pick the point with highest confidence
-            best_idx = indices[confidence[indices].argmax()]
+        # Find first occurrence of each unique key (which has highest confidence due to sorting)
+        _, first_occurrence_idx = np.unique(sorted_keys, return_index=True)
 
-            unique_points.append(points[best_idx])
-            unique_colors.append(colors[best_idx])
-            unique_descriptors.append(descriptors[best_idx])
-            unique_confidence.append(confidence[best_idx])
+        # Map back to original indices
+        best_indices = sort_idx[first_occurrence_idx]
 
-        result_points = np.array(unique_points)
-        result_colors = np.array(unique_colors)
-        result_descriptors = np.array(unique_descriptors)
-        result_confidence = np.array(unique_confidence)
+        # Extract results using vectorized indexing
+        result_points = points[best_indices]
+        result_colors = colors[best_indices]
+        result_descriptors = descriptors[best_indices]
+        result_confidence = confidence[best_indices]
+
+        logger.info(f"After voxel dedup: {len(result_points):,} points")
 
         # If still too many points, subsample by confidence
         if len(result_points) > max_points:
@@ -623,6 +628,7 @@ class MASt3REngine:
             result_colors = result_colors[top_indices]
             result_descriptors = result_descriptors[top_indices]
             result_confidence = result_confidence[top_indices]
+            logger.info(f"After max_points limit: {len(result_points):,} points")
 
         return result_points, result_colors, result_descriptors, result_confidence
 
