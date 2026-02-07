@@ -58,6 +58,19 @@ mast3r:
   device: "cuda"
 
 # ============================================================
+# Global Alignment Configuration (CS-1)
+# Uses MASt3R-SfM's sparse_global_alignment for coordinate unification
+# ============================================================
+global_alignment:
+  enabled: true               # Use global alignment (recommended)
+  subsample: 8                # Subsampling factor for correspondences
+  lr1: 0.07                   # Learning rate for coarse alignment
+  niter1: 300                 # Iterations for coarse alignment
+  lr2: 0.01                   # Learning rate for refinement
+  niter2: 300                 # Iterations for refinement
+  cache_dir: "storage/alignment_cache"  # Cache for intermediate results
+
+# ============================================================
 # Face Detection Configuration (CS-1)
 # ============================================================
 face_detection:

@@ -18,6 +18,7 @@ Usage:
     # Options
     python scripts/demo_enrollment.py --min-keyframes 8  # Fewer frames for faster demo
     python scripts/demo_enrollment.py --skip-capture     # Use saved keyframes
+    python scripts/demo_enrollment.py --output-dir /mnt/c/Users/sekit/Desktop  # Save to Desktop
 
 Controls (during capture):
     - Press 'q' to quit
@@ -36,6 +37,7 @@ import argparse
 import json
 import webbrowser
 import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
@@ -264,8 +266,19 @@ def run_reconstruction(keyframes: List[KeyframeCandidate]):
 
 
 def visualize_point_cloud(points: np.ndarray, colors: Optional[np.ndarray],
-                          title: str = "3D Face Reconstruction"):
-    """Visualize point cloud in browser using Plotly."""
+                          title: str = "3D Face Reconstruction",
+                          output_dir: Optional[Path] = None):
+    """
+    Visualize point cloud in browser using Plotly.
+
+    Args:
+        points: 3D point coordinates (N, 3).
+        colors: RGB colors per point (N, 3), optional.
+        title: Title for the visualization.
+        output_dir: Directory to save the HTML file. If provided, saves with
+                    timestamp filename (e.g., face_3d_202602072212.html).
+                    If None, uses a temporary file.
+    """
     print("\n" + "=" * 60)
     print("PHASE 3: Visualization")
     print("=" * 60)
@@ -360,10 +373,21 @@ def visualize_point_cloud(points: np.ndarray, colors: Optional[np.ndarray],
 </body>
 </html>"""
 
-    # Save and open
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as f:
-        f.write(html_content)
-        html_path = f.name
+    # Save HTML file
+    if output_dir is not None:
+        # Save to specified directory with timestamp filename
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M")
+        html_path = output_dir / f"face_3d_{timestamp}.html"
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        html_path = str(html_path)
+    else:
+        # Use temporary file
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as f:
+            f.write(html_content)
+            html_path = f.name
 
     print(f"Opening visualization in browser...")
     print(f"  File: {html_path}")
@@ -452,6 +476,11 @@ def main():
         "--save-keyframes", action="store_true",
         help="Save captured keyframes for later use"
     )
+    parser.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Directory to save visualization HTML with timestamp "
+             "(e.g., /mnt/c/Users/sekit/Desktop). If not specified, uses temp file."
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -497,8 +526,12 @@ def main():
         return 1
 
     # Phase 3: Visualization
-    html_path = visualize_point_cloud(points, colors,
-                                       f"3D Face Reconstruction ({len(points):,} points)")
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    html_path = visualize_point_cloud(
+        points, colors,
+        title=f"3D Face Reconstruction ({len(points):,} points)",
+        output_dir=output_dir
+    )
 
     print("\n" + "=" * 60)
     print("DEMO COMPLETE!")
