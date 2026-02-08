@@ -185,24 +185,17 @@ def draw_info_panel(frame: np.ndarray, detection: FaceDetection,
     cv2.putText(frame, pose_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # Keyframe count and coverage
-    count_text = f"Keyframes: {status.total_frames}/{target_count}"
+    # Target-based progress
+    count_text = f"Targets: {status.targets_captured}/{status.targets_total}"
     cv2.putText(frame, count_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # Progress bar
-    progress = status.total_frames / target_count
+    # Progress bar based on targets
+    progress = status.targets_captured / max(status.targets_total, 1)
     bar_width = 150
     bar_x = 160
     cv2.rectangle(frame, (bar_x, 40), (bar_x + bar_width, 55), (100, 100, 100), -1)
     cv2.rectangle(frame, (bar_x, 40), (bar_x + int(bar_width * progress), 55), (0, 255, 0), -1)
-
-    # Coverage ranges
-    yaw_min, yaw_max = status.yaw_range
-    pitch_min, pitch_max = status.pitch_range
-    coverage_text = f"Yaw: [{yaw_min:+.0f}, {yaw_max:+.0f}]  Pitch: [{pitch_min:+.0f}, {pitch_max:+.0f}]"
-    cv2.putText(frame, coverage_text, (10, 75), cv2.FONT_HERSHEY_SIMPLEX,
-                0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
     # FPS
     fps_text = f"FPS: {fps:.1f}"
@@ -220,14 +213,15 @@ def draw_info_panel(frame: np.ndarray, detection: FaceDetection,
         cv2.putText(frame, "KEYFRAME!", (w//2 - 80, h//2), cv2.FONT_HERSHEY_SIMPLEX,
                     1.2, (0, 255, 0), 3, cv2.LINE_AA)
 
-    # Missing directions
-    if status.missing_directions:
-        dirs_text = "Turn: " + ", ".join(status.missing_directions)
-        cv2.putText(frame, dirs_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 255), 2, cv2.LINE_AA)
-    elif status.is_sufficient:
-        cv2.putText(frame, "Coverage complete!", (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 0), 2, cv2.LINE_AA)
+    # Next target guidance or completion message
+    if status.is_sufficient:
+        cv2.putText(frame, "All targets captured! Press 'e' to export", (10, h - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+    elif status.next_target:
+        t_yaw, t_pitch = status.next_target
+        guide_text = f"Align to Yaw={t_yaw:+.0f}, Pitch={t_pitch:+.0f} (keep Roll near 0)"
+        cv2.putText(frame, guide_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
 
 def draw_no_face_message(frame: np.ndarray):
@@ -507,6 +501,7 @@ def main():
                 break
             elif key == ord('r'):
                 keyframe_candidates.clear()
+                selector.reset()
                 print("Keyframe collection reset!")
             elif key == ord('s'):
                 filename = f"capture_{int(time.time())}.jpg"

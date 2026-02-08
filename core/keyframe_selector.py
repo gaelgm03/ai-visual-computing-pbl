@@ -5,11 +5,10 @@ This module selects optimal frames from a webcam stream for face enrollment.
 The goal is to capture a diverse set of face images that cover different
 viewing angles (yaw, pitch) while maintaining image quality.
 
-During enrollment, the user slowly rotates their head while the system
-automatically selects keyframes that:
-1. Are not blurry
-2. Have good face detection confidence
-3. Add angular novelty (different head pose from existing frames)
+The selector uses a target-pose strategy: N target poses are pre-defined
+on a uniform grid across the front-facing yaw/pitch range. The user is
+guided to each target, and frames are captured when the head pose is
+within tolerance of an uncaptured target.
 
 Usage:
     from core.keyframe_selector import KeyframeSelector, KeyframeCandidate
@@ -36,9 +35,10 @@ Usage:
 """
 
 import logging
+import math
 import numpy as np
 import cv2
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Any, List, Optional, Tuple
 from core.face_detector import FaceDetection
 
@@ -78,6 +78,10 @@ class CoverageStatus:
         is_sufficient: True if we have enough diverse keyframes for enrollment.
         missing_directions: List of directions user still needs to turn.
                             Possible values: "left", "right", "up", "down"
+        targets_captured: Number of target poses that have been captured.
+        targets_total: Total number of target poses.
+        next_target: (yaw, pitch) of the recommended next target, or None.
+        next_target_direction: Human-readable direction like "RIGHT and UP".
     """
 
     yaw_range: Tuple[float, float]
@@ -85,26 +89,26 @@ class CoverageStatus:
     total_frames: int
     is_sufficient: bool
     missing_directions: List[str]
+    targets_captured: int = 0
+    targets_total: int = 0
+    next_target: Optional[Tuple[float, float]] = None
+    next_target_direction: Optional[str] = None
 
 
 class KeyframeSelector:
     """
     Selects diverse, high-quality keyframes for face enrollment.
 
-    The selector ensures that captured frames:
-    1. Cover a sufficient range of head poses (yaw/pitch angles)
-    2. Meet quality requirements (not blurry, good detection confidence)
-    3. Add novelty (each frame is sufficiently different from existing ones)
-
-    Attributes:
-        target_count: Target number of keyframes to capture (e.g., 12).
-        min_yaw_spread: Minimum yaw angle spread required (e.g., 40 degrees).
-        min_pitch_spread: Minimum pitch angle spread required (e.g., 20 degrees).
-        max_roll: Maximum allowed roll angle (frames with more roll are rejected).
-        pose_novelty_threshold: Minimum angular difference from existing frames.
-        blur_threshold: Minimum Laplacian variance (higher = sharper image).
-        min_confidence: Minimum face detection confidence to accept frame.
+    Uses a target-pose strategy: N target poses are pre-defined on a uniform
+    grid across the front-facing yaw/pitch range. Frames are captured when
+    the head pose is within tolerance of an uncaptured target. This ensures
+    uniform angular coverage regardless of the user's head movement pattern.
     """
+
+    # Practical yaw/pitch ranges for face detection (beyond these, detection fails)
+    YAW_RANGE = (-25.0, 25.0)
+    PITCH_RANGE = (-15.0, 15.0)
+    TARGET_TOLERANCE = 7.0  # degrees from target center to accept
 
     def __init__(self, config: Dict[str, Any]):
         """
@@ -119,18 +123,7 @@ class KeyframeSelector:
                 - blur_threshold: Laplacian variance threshold
                 - (optional) max_roll: Maximum roll angle to accept
                 - (optional) min_confidence: Minimum detection confidence
-
-        Example:
-            config = {
-                "target_count": 12,
-                "min_yaw_spread": 40.0,
-                "min_pitch_spread": 20.0,
-                "pose_novelty_threshold": 5.0,
-                "blur_threshold": 100.0
-            }
-            selector = KeyframeSelector(config)
         """
-        # Load configuration with defaults
         self.target_count = config.get("target_count", 12)
         self.min_yaw_spread = config.get("min_yaw_spread", 40.0)
         self.min_pitch_spread = config.get("min_pitch_spread", 20.0)
@@ -138,6 +131,67 @@ class KeyframeSelector:
         self.blur_threshold = config.get("blur_threshold", 100.0)
         self.max_roll = config.get("max_roll", 15.0)
         self.min_confidence = config.get("min_confidence", 0.9)
+
+        # Generate target poses and tracking state
+        self.target_poses = self._generate_target_poses(self.target_count)
+        self._captured_target_indices: set = set()
+
+        logger.info(f"KeyframeSelector initialized with {len(self.target_poses)} target poses")
+        for i, (y, p) in enumerate(self.target_poses):
+            logger.debug(f"  Target {i}: yaw={y:.1f}, pitch={p:.1f}")
+
+    def _generate_target_poses(self, n: int) -> List[Tuple[float, float]]:
+        """
+        Generate N target poses uniformly distributed across the yaw/pitch range.
+
+        Uses a grid layout with the best factorization of N into rows × cols.
+        """
+        yaw_min, yaw_max = self.YAW_RANGE
+        pitch_min, pitch_max = self.PITCH_RANGE
+
+        # Find best grid factorization: prefer more yaw columns (horizontal variety)
+        n_yaw, n_pitch = self._best_grid_factors(n)
+
+        # Generate uniform grid points
+        if n_yaw == 1:
+            yaw_values = [0.0]
+        else:
+            yaw_values = [
+                yaw_min + i * (yaw_max - yaw_min) / (n_yaw - 1)
+                for i in range(n_yaw)
+            ]
+
+        if n_pitch == 1:
+            pitch_values = [0.0]
+        else:
+            pitch_values = [
+                pitch_min + i * (pitch_max - pitch_min) / (n_pitch - 1)
+                for i in range(n_pitch)
+            ]
+
+        targets = []
+        for pitch in pitch_values:
+            for yaw in yaw_values:
+                targets.append((yaw, pitch))
+
+        return targets[:n]  # Trim to exactly N if factorization gives more
+
+    @staticmethod
+    def _best_grid_factors(n: int) -> Tuple[int, int]:
+        """Find (n_yaw, n_pitch) factorization of n, preferring wider yaw."""
+        best = (n, 1)
+        best_ratio = float('inf')
+
+        for cols in range(1, n + 1):
+            if n % cols == 0:
+                rows = n // cols
+                # Prefer roughly 2:1 ratio (more yaw than pitch)
+                ratio_diff = abs(cols / max(rows, 1) - 2.0)
+                if ratio_diff < best_ratio:
+                    best_ratio = ratio_diff
+                    best = (cols, rows)  # (n_yaw, n_pitch)
+
+        return best
 
     def should_capture(
         self,
@@ -148,24 +202,16 @@ class KeyframeSelector:
         """
         Determine if a frame should be captured as a keyframe.
 
-        This method checks multiple criteria to decide if the current frame
-        adds value to the enrollment dataset.
+        Uses target-pose matching: captures when the head pose is within
+        tolerance of an uncaptured target pose.
 
         Args:
             detection: FaceDetection result from the face detector.
             existing: List of already captured KeyframeCandidates.
             frame: Optional original frame for blur detection.
-                   If not provided, blur check is skipped.
 
         Returns:
             True if this frame should be captured as a keyframe.
-
-        Criteria checked (in order):
-            1. Not already at target count
-            2. Detection confidence is high enough
-            3. Roll angle is within acceptable range
-            4. Image is not blurry (if frame provided)
-            5. Head pose adds novelty to existing set
         """
         # Check 1: Don't capture more than target count
         if len(existing) >= self.target_count:
@@ -188,11 +234,78 @@ class KeyframeSelector:
             if blur_score < self.blur_threshold:
                 return False
 
-        # Check 5: Head pose should add novelty
-        if not self._adds_novelty(yaw, pitch, existing):
+        # Check 5: Head pose must match an uncaptured target
+        target_idx = self._find_matching_target(yaw, pitch)
+        if target_idx < 0:
             return False
 
+        # Mark this target as captured
+        self._captured_target_indices.add(target_idx)
         return True
+
+    def _find_matching_target(self, yaw: float, pitch: float) -> int:
+        """
+        Find the nearest uncaptured target within tolerance.
+
+        Returns the target index, or -1 if no uncaptured target is close enough.
+        """
+        best_idx = -1
+        best_dist = float('inf')
+
+        for i, (t_yaw, t_pitch) in enumerate(self.target_poses):
+            if i in self._captured_target_indices:
+                continue
+
+            dist = math.sqrt((yaw - t_yaw) ** 2 + (pitch - t_pitch) ** 2)
+            if dist < self.TARGET_TOLERANCE and dist < best_dist:
+                best_dist = dist
+                best_idx = i
+
+        return best_idx
+
+    def get_next_target(self, current_yaw: float = 0.0, current_pitch: float = 0.0) -> Optional[Tuple[float, float]]:
+        """
+        Get the nearest uncaptured target pose from the current head position.
+
+        Returns (yaw, pitch) of the next target, or None if all captured.
+        """
+        best_target = None
+        best_dist = float('inf')
+
+        for i, (t_yaw, t_pitch) in enumerate(self.target_poses):
+            if i in self._captured_target_indices:
+                continue
+
+            dist = math.sqrt((current_yaw - t_yaw) ** 2 + (current_pitch - t_pitch) ** 2)
+            if dist < best_dist:
+                best_dist = dist
+                best_target = (t_yaw, t_pitch)
+
+        return best_target
+
+    @staticmethod
+    def _pose_to_direction(target_yaw: float, target_pitch: float) -> str:
+        """Convert a target pose to a human-readable direction string."""
+        parts = []
+
+        if target_yaw < -5:
+            parts.append("LEFT")
+        elif target_yaw > 5:
+            parts.append("RIGHT")
+
+        if target_pitch < -5:
+            parts.append("DOWN")
+        elif target_pitch > 5:
+            parts.append("UP")
+
+        if not parts:
+            return "CENTER"
+
+        return " and ".join(parts)
+
+    def reset(self):
+        """Reset captured target tracking (e.g., when user presses 'r')."""
+        self._captured_target_indices.clear()
 
     def _compute_blur_score(self, frame: np.ndarray) -> float:
         """
@@ -208,16 +321,9 @@ class KeyframeSelector:
         Returns:
             Blur score (higher = sharper). Typical threshold is around 100.
         """
-        # Convert to grayscale for edge detection
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Apply Laplacian operator to detect edges
         laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-
-        # Variance of Laplacian indicates sharpness
-        # Higher variance = more edges = sharper image
         variance = laplacian.var()
-
         return float(variance)
 
     def _adds_novelty(
@@ -225,34 +331,17 @@ class KeyframeSelector:
     ) -> bool:
         """
         Check if the given pose adds novelty to the existing keyframe set.
-
-        A pose is considered novel if it's sufficiently different from
-        all existing poses. This ensures we capture diverse viewpoints.
-
-        Args:
-            yaw: Current yaw angle in degrees.
-            pitch: Current pitch angle in degrees.
-            existing: List of existing keyframes.
-
-        Returns:
-            True if this pose adds novelty (different enough from all existing).
+        Kept for use by select_best_candidates().
         """
-        # First frame is always novel
         if len(existing) == 0:
             return True
 
-        # Check distance to all existing poses
         for candidate in existing:
             existing_yaw, existing_pitch, _ = candidate.head_pose
-
-            # Calculate angular distance (simple Euclidean in angle space)
             yaw_diff = abs(yaw - existing_yaw)
             pitch_diff = abs(pitch - existing_pitch)
 
-            # If either angle is significantly different, consider it novel
-            # Use max instead of sum to be more lenient
             if yaw_diff < self.pose_novelty_threshold and pitch_diff < self.pose_novelty_threshold:
-                # Found an existing frame too similar to this one
                 return False
 
         return True
@@ -261,56 +350,45 @@ class KeyframeSelector:
         """
         Get the current coverage status of captured keyframes.
 
-        This helps the UI know:
-        - How many frames have been captured
-        - What angular range has been covered
-        - Whether enrollment can proceed
-        - Which directions the user still needs to turn
-
-        Args:
-            candidates: List of captured KeyframeCandidates.
-
-        Returns:
-            CoverageStatus object with detailed coverage information.
-
-        Example:
-            status = selector.get_coverage_status(candidates)
-            if not status.is_sufficient:
-                for direction in status.missing_directions:
-                    print(f"Please turn your head {direction}")
+        Reports target-based progress: how many of the pre-defined target
+        poses have been captured, and which direction to look next.
         """
+        n_captured = len(self._captured_target_indices)
+        n_total = len(self.target_poses)
+
         # Handle empty case
         if len(candidates) == 0:
+            next_target = self.get_next_target()
+            next_dir = self._pose_to_direction(*next_target) if next_target else None
             return CoverageStatus(
                 yaw_range=(0.0, 0.0),
                 pitch_range=(0.0, 0.0),
                 total_frames=0,
                 is_sufficient=False,
                 missing_directions=["left", "right", "up", "down"],
+                targets_captured=n_captured,
+                targets_total=n_total,
+                next_target=next_target,
+                next_target_direction=next_dir,
             )
 
-        # Extract yaw and pitch values from all candidates
+        # Extract yaw and pitch values
         yaws = [c.head_pose[0] for c in candidates]
         pitches = [c.head_pose[1] for c in candidates]
 
-        # Calculate ranges
         yaw_min, yaw_max = min(yaws), max(yaws)
         pitch_min, pitch_max = min(pitches), max(pitches)
 
-        yaw_spread = yaw_max - yaw_min
-        pitch_spread = pitch_max - pitch_min
+        # Missing directions based on uncaptured targets
+        missing = self._get_missing_from_targets()
 
-        # Determine missing directions
-        missing = self._get_missing_directions(yaw_min, yaw_max, pitch_min, pitch_max)
+        # Sufficient when all targets captured
+        is_sufficient = n_captured >= n_total
 
-        # Check if coverage is sufficient
-        # Need: enough frames AND enough angular spread
-        has_enough_frames = len(candidates) >= self.target_count
-        has_enough_yaw = yaw_spread >= self.min_yaw_spread
-        has_enough_pitch = pitch_spread >= self.min_pitch_spread
-
-        # We require minimum frames OR both angular spreads met
-        is_sufficient = has_enough_frames and has_enough_yaw and has_enough_pitch
+        # Next target closest to current position (use last candidate's pose)
+        current_yaw, current_pitch = yaws[-1], pitches[-1]
+        next_target = self.get_next_target(current_yaw, current_pitch)
+        next_dir = self._pose_to_direction(*next_target) if next_target else None
 
         return CoverageStatus(
             yaw_range=(yaw_min, yaw_max),
@@ -318,100 +396,54 @@ class KeyframeSelector:
             total_frames=len(candidates),
             is_sufficient=is_sufficient,
             missing_directions=missing,
+            targets_captured=n_captured,
+            targets_total=n_total,
+            next_target=next_target,
+            next_target_direction=next_dir,
         )
+
+    def _get_missing_from_targets(self) -> List[str]:
+        """Determine missing directions based on uncaptured target poses."""
+        directions = set()
+        for i, (t_yaw, t_pitch) in enumerate(self.target_poses):
+            if i in self._captured_target_indices:
+                continue
+            if t_yaw < -5:
+                directions.add("left")
+            if t_yaw > 5:
+                directions.add("right")
+            if t_pitch < -5:
+                directions.add("down")
+            if t_pitch > 5:
+                directions.add("up")
+        return sorted(directions)
 
     def _get_missing_directions(
         self, yaw_min: float, yaw_max: float, pitch_min: float, pitch_max: float
     ) -> List[str]:
-        """
-        Determine which directions the user still needs to turn.
-
-        Based on current coverage and target ranges, this identifies
-        directions where more frames are needed.
-
-        Args:
-            yaw_min: Minimum captured yaw angle.
-            yaw_max: Maximum captured yaw angle.
-            pitch_min: Minimum captured pitch angle.
-            pitch_max: Maximum captured pitch angle.
-
-        Returns:
-            List of direction strings: "left", "right", "up", "down"
-        """
-        missing = []
-
-        # Calculate how much more yaw spread we need
-        current_yaw_spread = yaw_max - yaw_min
-        needed_yaw_spread = self.min_yaw_spread - current_yaw_spread
-
-        if needed_yaw_spread > 0:
-            # Check which direction has more room to expand
-            # Target range is roughly -20 to +20 for yaw (40 degree spread)
-            target_yaw_half = self.min_yaw_spread / 2
-
-            # If not enough coverage on the left (negative yaw)
-            if yaw_min > -target_yaw_half:
-                missing.append("left")
-
-            # If not enough coverage on the right (positive yaw)
-            if yaw_max < target_yaw_half:
-                missing.append("right")
-
-        # Calculate how much more pitch spread we need
-        current_pitch_spread = pitch_max - pitch_min
-        needed_pitch_spread = self.min_pitch_spread - current_pitch_spread
-
-        if needed_pitch_spread > 0:
-            # Target range is roughly -10 to +10 for pitch (20 degree spread)
-            target_pitch_half = self.min_pitch_spread / 2
-
-            # If not enough coverage looking down (negative pitch)
-            if pitch_min > -target_pitch_half:
-                missing.append("down")
-
-            # If not enough coverage looking up (positive pitch)
-            if pitch_max < target_pitch_half:
-                missing.append("up")
-
-        return missing
+        """Kept for backwards compatibility."""
+        return self._get_missing_from_targets()
 
     def compute_quality_score(
         self, frame: np.ndarray, detection: FaceDetection
     ) -> float:
         """
         Compute an overall quality score for a potential keyframe.
-
-        This combines multiple quality metrics into a single score
-        that can be used for ranking or filtering frames.
-
-        Args:
-            frame: The image frame (BGR format).
-            detection: Face detection result for this frame.
-
-        Returns:
-            Quality score between 0.0 and 1.0 (higher is better).
         """
-        # Component 1: Blur score (normalized)
         blur = self._compute_blur_score(frame)
-        # Normalize: 100 is threshold, 500 is very sharp
         blur_normalized = min(1.0, blur / 500.0)
 
-        # Component 2: Detection confidence
         confidence = detection.confidence
 
-        # Component 3: Roll penalty (face should be upright)
         _, _, roll = detection.head_pose
-        roll_score = max(0.0, 1.0 - abs(roll) / 30.0)  # 0 at 30 degrees
+        roll_score = max(0.0, 1.0 - abs(roll) / 30.0)
 
-        # Component 4: Face size (larger faces are better)
         x1, y1, x2, y2 = detection.bbox
         face_area = (x2 - x1) * (y2 - y1)
         frame_area = frame.shape[0] * frame.shape[1]
         size_ratio = face_area / frame_area
-        # Normalize: 0.1 (10% of frame) is good
         size_score = min(1.0, size_ratio / 0.1)
 
-        # Weighted combination
         quality = (
             0.3 * blur_normalized
             + 0.3 * confidence
@@ -426,16 +458,6 @@ class KeyframeSelector:
     ) -> List[KeyframeCandidate]:
         """
         Select the best candidates from a list, prioritizing diversity and quality.
-
-        This can be used to reduce the number of keyframes while maintaining
-        good angular coverage.
-
-        Args:
-            candidates: List of all captured keyframe candidates.
-            max_count: Maximum number to select. If None, uses target_count.
-
-        Returns:
-            Filtered list of best candidates.
         """
         if max_count is None:
             max_count = self.target_count
@@ -443,19 +465,14 @@ class KeyframeSelector:
         if len(candidates) <= max_count:
             return candidates
 
-        # Sort by quality score (highest first)
         sorted_candidates = sorted(
             candidates, key=lambda c: c.quality_score, reverse=True
         )
 
-        # Greedy selection: pick best quality while maintaining diversity
         selected = []
-
         for candidate in sorted_candidates:
             if len(selected) >= max_count:
                 break
-
-            # Check if this candidate adds novelty to selected set
             yaw, pitch, _ = candidate.head_pose
             if self._adds_novelty(yaw, pitch, selected):
                 selected.append(candidate)
@@ -464,7 +481,6 @@ class KeyframeSelector:
 
 
 if __name__ == "__main__":
-    # Quick test of the keyframe selector
     print("Testing KeyframeSelector...")
 
     config = {
@@ -476,35 +492,9 @@ if __name__ == "__main__":
     }
 
     selector = KeyframeSelector(config)
-    print("KeyframeSelector initialized successfully!")
+    print(f"Generated {len(selector.target_poses)} target poses:")
+    for i, (y, p) in enumerate(selector.target_poses):
+        print(f"  Target {i}: yaw={y:.1f}, pitch={p:.1f}")
 
-    # Simulate some keyframe candidates
-    import time
-
-    # Create dummy candidates with different poses
-    test_candidates = []
-    poses = [
-        (-20, 0, 0),  # Looking left
-        (0, 0, 0),  # Center
-        (20, 0, 0),  # Looking right
-        (0, -10, 0),  # Looking down
-        (0, 10, 0),  # Looking up
-    ]
-
-    for i, pose in enumerate(poses):
-        candidate = KeyframeCandidate(
-            frame=np.zeros((480, 640, 3), dtype=np.uint8),  # Dummy frame
-            head_pose=pose,
-            timestamp=time.time(),
-            quality_score=0.9,
-        )
-        test_candidates.append(candidate)
-
-    # Get coverage status
-    status = selector.get_coverage_status(test_candidates)
-    print(f"\nCoverage Status:")
-    print(f"  Total frames: {status.total_frames}")
-    print(f"  Yaw range: {status.yaw_range}")
-    print(f"  Pitch range: {status.pitch_range}")
-    print(f"  Is sufficient: {status.is_sufficient}")
-    print(f"  Missing directions: {status.missing_directions}")
+    print(f"\nGrid: {selector._best_grid_factors(12)} (n_yaw x n_pitch)")
+    print(f"Tolerance: {selector.TARGET_TOLERANCE} degrees")

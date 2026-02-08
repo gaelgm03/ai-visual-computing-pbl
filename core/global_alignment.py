@@ -202,6 +202,7 @@ class GlobalAligner:
                 niter1=self.niter1,
                 lr2=self.lr2,
                 niter2=self.niter2,
+                shared_intrinsics=True,  # All frames from same webcam
             )
         except Exception as e:
             logger.error(f"Global alignment failed: {e}")
@@ -236,13 +237,25 @@ class GlobalAligner:
         image_paths = []
 
         try:
-            # Save frames as temporary images
+            # Save frames as temporary images with consistent dimensions.
+            # Face crops have variable sizes depending on head pose, which causes
+            # wildly different focal length estimates (e.g., 653 to 1552). Padding
+            # to square and resizing to a uniform size ensures consistent intrinsics.
+            TARGET_SIZE = 512
             for i, frame in enumerate(frames):
                 path = os.path.join(temp_dir, f"frame_{i:04d}.jpg")
-                # Convert RGB to BGR for OpenCV if needed, then save
                 if frame.dtype != np.uint8:
                     frame = (frame * 255).astype(np.uint8)
-                Image.fromarray(frame).save(path, quality=95)
+                img_pil = Image.fromarray(frame)
+                max_dim = max(img_pil.size)
+                # Use mean color instead of black to avoid matching artifacts
+                mean_color = tuple(np.array(frame).mean(axis=(0, 1)).astype(int))
+                padded = Image.new('RGB', (max_dim, max_dim), mean_color)
+                padded.paste(img_pil,
+                             ((max_dim - img_pil.width) // 2,
+                              (max_dim - img_pil.height) // 2))
+                padded = padded.resize((TARGET_SIZE, TARGET_SIZE), Image.LANCZOS)
+                padded.save(path, quality=95)
                 image_paths.append(path)
 
             # Use default cache path if not provided
@@ -284,9 +297,10 @@ class GlobalAligner:
         # Try to get dense 3D points (preferred for face reconstruction)
         # Fall back to sparse if dense extraction fails
         use_dense = False
+        dense_confs = None
         try:
             logger.info("Extracting dense point cloud...")
-            dense_pts3d, depthmaps_dense, _ = scene.get_dense_pts3d(
+            dense_pts3d, depthmaps_dense, dense_confs = scene.get_dense_pts3d(
                 clean_depth=True,
                 subsample=self.subsample
             )
@@ -352,10 +366,15 @@ class GlobalAligner:
                 # Default gray color
                 all_colors.append(np.full((len(valid_pts), 3), 128, dtype=np.uint8))
 
-            # Set confidence to 1.0 for all valid points
-            # Note: confs from get_dense_pts3d() is at full resolution, not matching
-            # subsampled points, so we use uniform confidence for simplicity
-            all_confidence.append(np.ones(len(valid_pts), dtype=np.float32))
+            # Use actual confidence from get_dense_pts3d() when available
+            # confs[i] has shape (H, W), pts3d[i] has shape (H*W, 3) — they match
+            # after flattening. MASt3R's clean_pointcloud sets bad points to conf=0,
+            # and its own show() uses c > 1 as the reliability threshold.
+            if use_dense and dense_confs is not None and i < len(dense_confs):
+                conf_np = to_numpy(dense_confs[i]).ravel()  # (H, W) -> (H*W,)
+                all_confidence.append(conf_np[valid_mask].astype(np.float32))
+            else:
+                all_confidence.append(np.ones(len(valid_pts), dtype=np.float32))
 
         if all_points:
             point_cloud = np.concatenate(all_points, axis=0)
