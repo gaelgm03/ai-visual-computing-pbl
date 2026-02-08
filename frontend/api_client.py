@@ -269,10 +269,15 @@ class APIClient:
         )
         self._enrollment_session = session
         
-        if self.mode == ConnectionMode.LIVE:
-            # TODO: Connect to WebSocket ws://localhost:8000/ws/enroll/{user_name}
-            # For now, fall back to mock
-            pass
+        if self.mode == ConnectionMode.LIVE and WEBSOCKETS_AVAILABLE:
+            try:
+                ws_endpoint = f"{self.ws_url}/ws/enroll/{user_name}"
+                self._ws_connection = ws_connect(ws_endpoint)
+                print(f"[APIClient] Connected to WebSocket: {ws_endpoint}")
+            except Exception as e:
+                print(f"[APIClient] WebSocket connection failed: {e}")
+                session.error = str(e)
+                session.is_active = False
         
         return session
     
@@ -296,8 +301,8 @@ class APIClient:
         if self.mode == ConnectionMode.MOCK:
             result = self._mock.process_enrollment_frame(frame_b64)
         else:
-            # TODO: Send via WebSocket and await response
-            result = self._mock.process_enrollment_frame(frame_b64)
+            # Send via WebSocket and await response
+            result = self._send_frame_via_websocket(frame_b64)
         
         # Update session state
         self._enrollment_session.frames_sent += 1
@@ -306,11 +311,70 @@ class APIClient:
         
         return result
     
+    def _send_frame_via_websocket(self, frame_b64: str) -> EnrollmentFrame:
+        """
+        Send a frame via WebSocket and parse the response.
+        
+        Args:
+            frame_b64: Base64-encoded JPEG image
+            
+        Returns:
+            EnrollmentFrame with detection results from backend
+        """
+        if self._ws_connection is None:
+            return EnrollmentFrame(frame_id=-1, timestamp=time.time())
+        
+        try:
+            # Send frame to backend
+            message = json.dumps({"type": "frame", "data": frame_b64})
+            self._ws_connection.send(message)
+            
+            # Receive response
+            response_str = self._ws_connection.recv()
+            response = json.loads(response_str)
+            
+            # Check for enrollment complete
+            if response.get("type") == "enrollment_complete":
+                if self._enrollment_session:
+                    self._enrollment_session.is_active = False
+                return EnrollmentFrame(
+                    frame_id=self._enrollment_session.frames_sent if self._enrollment_session else 0,
+                    timestamp=time.time(),
+                    face_detected=True,
+                    is_keyframe=True,
+                )
+            
+            # Check for error
+            if response.get("type") == "error":
+                if self._enrollment_session:
+                    self._enrollment_session.error = response.get("error", "Unknown error")
+                return EnrollmentFrame(frame_id=-1, timestamp=time.time())
+            
+            # Parse frame_status response
+            head_pose = response.get("head_pose")
+            coverage = response.get("coverage", {})
+            
+            # Update session coverage status
+            if self._enrollment_session and coverage:
+                self._enrollment_session.coverage_status = coverage
+            
+            return EnrollmentFrame(
+                frame_id=response.get("total_captured", 0),
+                timestamp=time.time(),
+                face_detected=response.get("face_detected", False),
+                head_pose=head_pose,
+                is_keyframe=response.get("captured", False),
+            )
+            
+        except Exception as e:
+            print(f"[APIClient] WebSocket error: {e}")
+            return EnrollmentFrame(frame_id=-1, timestamp=time.time())
+    
     def get_enrollment_cloud(self) -> tuple:
         """Get current accumulated point cloud during enrollment."""
         if self.mode == ConnectionMode.MOCK:
             return self._mock.get_accumulated_cloud()
-        # TODO: Get from backend
+        # In live mode, cloud is built on backend and returned at completion
         return None, None
     
     def complete_enrollment(self) -> Dict[str, Any]:
@@ -324,8 +388,16 @@ class APIClient:
         if self.mode == ConnectionMode.MOCK:
             result = self._mock.finalize_enrollment(user_name)
         else:
-            # TODO: Call finalize endpoint
-            result = self._mock.finalize_enrollment(user_name)
+            # In live mode, enrollment completes automatically when enough keyframes are captured
+            # The WebSocket sends "enrollment_complete" message
+            # Close WebSocket connection
+            if self._ws_connection:
+                try:
+                    self._ws_connection.close()
+                except Exception:
+                    pass
+                self._ws_connection = None
+            result = {"success": True, "user_name": user_name}
         
         return result
     
@@ -334,6 +406,15 @@ class APIClient:
         if self._enrollment_session:
             self._enrollment_session.is_active = False
             self._enrollment_session = None
+        
+        # Close WebSocket if open
+        if self._ws_connection:
+            try:
+                self._ws_connection.close()
+            except Exception:
+                pass
+            self._ws_connection = None
+        
         self._mock.reset()
     
     # ==================== Authentication ====================
@@ -374,16 +455,63 @@ class APIClient:
                 {"user_id": "usr_0002", "name": "Bob", "enrolled_at": "2026-02-02 14:30"},
             ]
         else:
-            # TODO: GET /users
-            return []
+            # GET /users from backend
+            if not HTTPX_AVAILABLE:
+                print("[APIClient] httpx not available for REST calls")
+                return []
+            
+            try:
+                import httpx
+                response = httpx.get(
+                    f"{self.base_url}/users",
+                    timeout=self.timeout_sec
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    # API returns {"users": [...], "total": N}
+                    users = data.get("users", [])
+                    # Map API response to expected format
+                    return [
+                        {
+                            "user_id": u.get("user_id"),
+                            "name": u.get("user_name"),
+                            "enrolled_at": u.get("enrolled_at"),
+                            "n_points": u.get("n_points"),
+                        }
+                        for u in users
+                    ]
+                else:
+                    print(f"[APIClient] GET /users failed: {response.status_code}")
+                    return []
+            except Exception as e:
+                print(f"[APIClient] GET /users error: {e}")
+                return []
     
     def delete_user(self, user_id: str) -> bool:
         """Delete an enrolled user."""
         if self.mode == ConnectionMode.MOCK:
             return True
         else:
-            # TODO: DELETE /users/{user_id}
-            return False
+            # DELETE /users/{user_id} from backend
+            if not HTTPX_AVAILABLE:
+                print("[APIClient] httpx not available for REST calls")
+                return False
+            
+            try:
+                import httpx
+                response = httpx.delete(
+                    f"{self.base_url}/users/{user_id}",
+                    timeout=self.timeout_sec
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    return data.get("success", False)
+                else:
+                    print(f"[APIClient] DELETE /users/{user_id} failed: {response.status_code}")
+                    return False
+            except Exception as e:
+                print(f"[APIClient] DELETE /users/{user_id} error: {e}")
+                return False
     
     def get_user_template(self, user_id: str) -> Optional[Dict[str, Any]]:
         """Get a user's point cloud template for visualization."""
