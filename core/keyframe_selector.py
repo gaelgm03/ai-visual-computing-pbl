@@ -35,11 +35,14 @@ Usage:
         pass
 """
 
+import logging
 import numpy as np
 import cv2
 from dataclasses import dataclass
 from typing import Dict, Any, List, Optional, Tuple
 from core.face_detector import FaceDetection
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -181,6 +184,7 @@ class KeyframeSelector:
         # Check 4: Image should not be blurry
         if frame is not None:
             blur_score = self._compute_blur_score(frame)
+            logger.debug(f"Blur score: {blur_score:.1f} (threshold: {self.blur_threshold})")
             if blur_score < self.blur_threshold:
                 return False
 

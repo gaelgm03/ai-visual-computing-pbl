@@ -87,7 +87,7 @@ keyframe:
   min_yaw_spread: 40.0
   min_pitch_spread: 20.0
   pose_novelty_threshold: 5.0  # min degrees delta for new keyframe
-  blur_threshold: 100.0        # Laplacian variance threshold
+  blur_threshold: 25.0         # Laplacian variance threshold (clean frame without UI overlays)
   auto_export: true            # Auto-save keyframes when target_count reached
   export_dir: "storage/demo_keyframes"
 

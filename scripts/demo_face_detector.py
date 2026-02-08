@@ -307,6 +307,19 @@ def export_keyframes(keyframe_candidates: List[KeyframeCandidate], output_dir: P
 
 def main():
     """Main demo function."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Face Detection & Keyframe Capture Demo")
+    parser.add_argument(
+        "--export-dir", type=str, default=None,
+        help="Directory to export keyframes (default: from config.yaml)"
+    )
+    parser.add_argument(
+        "--resolution", type=str, default="640x480",
+        help="Webcam resolution WxH (e.g., 1280x720, 1920x1080)"
+    )
+    args = parser.parse_args()
+
     print("=" * 60)
     print("Face Detection Demo - CS-1 Core Modules Test")
     print("=" * 60)
@@ -346,16 +359,24 @@ def main():
         print("Make sure your webcam is connected and not used by another application.")
         return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    res_w, res_h = map(int, args.resolution.split("x"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
+    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Requested: {res_w}x{res_h}, Actual: {actual_w}x{actual_h}")
     print("Webcam opened successfully!")
     print()
     print("Starting live demo... Press 'q' to quit.")
 
-    # Auto-export settings from config
+    # Auto-export settings: CLI argument takes priority over config
     auto_export = keyframe_config.get("auto_export", False)
-    export_dir_str = keyframe_config.get("export_dir", "storage/demo_keyframes")
-    export_dir = project_root / export_dir_str
+    if args.export_dir:
+        export_dir = Path(args.export_dir)
+        auto_export = True
+    else:
+        export_dir_str = keyframe_config.get("export_dir", "storage/demo_keyframes")
+        export_dir = project_root / export_dir_str
     target_count = keyframe_config.get("target_count", 12)
 
     if auto_export:
@@ -409,11 +430,14 @@ def main():
             # Detect face
             detection = detector.detect(frame)
 
+            # Save clean frame before drawing UI overlays (for keyframe capture)
+            clean_frame = frame.copy()
+
             # Check if keyframe was captured recently (for flash effect)
             keyframe_captured = (time.time() - last_keyframe_time) < keyframe_flash_duration
 
             if detection is not None:
-                # Draw bounding box
+                # Draw bounding box (on display frame only)
                 x1, y1, x2, y2 = detection.bbox
                 color = (0, 255, 0) if detection.confidence > 0.8 else (0, 255, 255)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -428,17 +452,21 @@ def main():
                 # Draw head pose axes
                 draw_head_pose_axes(frame, detection)
 
-                # Check if should capture keyframe
-                should_capture = selector.should_capture(detection, keyframe_candidates, frame)
+                # Show blur score for threshold tuning
+                blur_score = selector._compute_blur_score(clean_frame)
+                print(f"\rBlur: {blur_score:.1f} (thr: {selector.blur_threshold})", end="")
+
+                # Check if should capture keyframe (use clean frame for blur check)
+                should_capture = selector.should_capture(detection, keyframe_candidates, clean_frame)
 
                 if should_capture:
-                    # Create keyframe candidate
-                    cropped = detector.crop_face_region(frame, detection)
+                    # Create keyframe candidate from clean frame (no UI overlays)
+                    cropped = detector.crop_face_region(clean_frame, detection)
                     candidate = KeyframeCandidate(
                         frame=cropped,
                         head_pose=detection.head_pose,
                         timestamp=time.time(),
-                        quality_score=selector.compute_quality_score(frame, detection)
+                        quality_score=selector.compute_quality_score(clean_frame, detection)
                     )
                     keyframe_candidates.append(candidate)
                     last_keyframe_time = time.time()
@@ -492,8 +520,7 @@ def main():
                 print(f"All landmarks: {'ON' if show_all_landmarks else 'OFF'}")
             elif key == ord('e'):
                 if keyframe_candidates:
-                    output_dir = project_root / "storage" / "demo_keyframes"
-                    export_keyframes(keyframe_candidates, output_dir)
+                    export_keyframes(keyframe_candidates, export_dir)
                 else:
                     print("No keyframes to export! Capture some first.")
 
