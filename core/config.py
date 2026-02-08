@@ -165,6 +165,11 @@ def get_global_alignment_config() -> Dict[str, Any]:
     return get_section("global_alignment")
 
 
+def get_post_processing_config() -> Dict[str, Any]:
+    """Get post-processing (noise removal) configuration."""
+    return get_section("post_processing")
+
+
 def get_matching_config() -> Dict[str, Any]:
     """Get matching algorithm configuration."""
     return get_section("matching")

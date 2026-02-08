@@ -185,24 +185,17 @@ def draw_info_panel(frame: np.ndarray, detection: FaceDetection,
     cv2.putText(frame, pose_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # Keyframe count and coverage
-    count_text = f"Keyframes: {status.total_frames}/{target_count}"
+    # Target-based progress
+    count_text = f"Targets: {status.targets_captured}/{status.targets_total}"
     cv2.putText(frame, count_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
-    # Progress bar
-    progress = status.total_frames / target_count
+    # Progress bar based on targets
+    progress = status.targets_captured / max(status.targets_total, 1)
     bar_width = 150
     bar_x = 160
     cv2.rectangle(frame, (bar_x, 40), (bar_x + bar_width, 55), (100, 100, 100), -1)
     cv2.rectangle(frame, (bar_x, 40), (bar_x + int(bar_width * progress), 55), (0, 255, 0), -1)
-
-    # Coverage ranges
-    yaw_min, yaw_max = status.yaw_range
-    pitch_min, pitch_max = status.pitch_range
-    coverage_text = f"Yaw: [{yaw_min:+.0f}, {yaw_max:+.0f}]  Pitch: [{pitch_min:+.0f}, {pitch_max:+.0f}]"
-    cv2.putText(frame, coverage_text, (10, 75), cv2.FONT_HERSHEY_SIMPLEX,
-                0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
     # FPS
     fps_text = f"FPS: {fps:.1f}"
@@ -220,14 +213,15 @@ def draw_info_panel(frame: np.ndarray, detection: FaceDetection,
         cv2.putText(frame, "KEYFRAME!", (w//2 - 80, h//2), cv2.FONT_HERSHEY_SIMPLEX,
                     1.2, (0, 255, 0), 3, cv2.LINE_AA)
 
-    # Missing directions
-    if status.missing_directions:
-        dirs_text = "Turn: " + ", ".join(status.missing_directions)
-        cv2.putText(frame, dirs_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 255), 2, cv2.LINE_AA)
-    elif status.is_sufficient:
-        cv2.putText(frame, "Coverage complete!", (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 0), 2, cv2.LINE_AA)
+    # Next target guidance or completion message
+    if status.is_sufficient:
+        cv2.putText(frame, "All targets captured! Press 'e' to export", (10, h - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
+    elif status.next_target:
+        t_yaw, t_pitch = status.next_target
+        guide_text = f"Align to Yaw={t_yaw:+.0f}, Pitch={t_pitch:+.0f} (keep Roll near 0)"
+        cv2.putText(frame, guide_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
 
 def draw_no_face_message(frame: np.ndarray):
@@ -307,6 +301,19 @@ def export_keyframes(keyframe_candidates: List[KeyframeCandidate], output_dir: P
 
 def main():
     """Main demo function."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Face Detection & Keyframe Capture Demo")
+    parser.add_argument(
+        "--export-dir", type=str, default=None,
+        help="Directory to export keyframes (default: from config.yaml)"
+    )
+    parser.add_argument(
+        "--resolution", type=str, default="640x480",
+        help="Webcam resolution WxH (e.g., 1280x720, 1920x1080)"
+    )
+    args = parser.parse_args()
+
     print("=" * 60)
     print("Face Detection Demo - CS-1 Core Modules Test")
     print("=" * 60)
@@ -346,16 +353,24 @@ def main():
         print("Make sure your webcam is connected and not used by another application.")
         return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    res_w, res_h = map(int, args.resolution.split("x"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
+    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Requested: {res_w}x{res_h}, Actual: {actual_w}x{actual_h}")
     print("Webcam opened successfully!")
     print()
     print("Starting live demo... Press 'q' to quit.")
 
-    # Auto-export settings from config
+    # Auto-export settings: CLI argument takes priority over config
     auto_export = keyframe_config.get("auto_export", False)
-    export_dir_str = keyframe_config.get("export_dir", "storage/demo_keyframes")
-    export_dir = project_root / export_dir_str
+    if args.export_dir:
+        export_dir = Path(args.export_dir)
+        auto_export = True
+    else:
+        export_dir_str = keyframe_config.get("export_dir", "storage/demo_keyframes")
+        export_dir = project_root / export_dir_str
     target_count = keyframe_config.get("target_count", 12)
 
     if auto_export:
@@ -409,11 +424,14 @@ def main():
             # Detect face
             detection = detector.detect(frame)
 
+            # Save clean frame before drawing UI overlays (for keyframe capture)
+            clean_frame = frame.copy()
+
             # Check if keyframe was captured recently (for flash effect)
             keyframe_captured = (time.time() - last_keyframe_time) < keyframe_flash_duration
 
             if detection is not None:
-                # Draw bounding box
+                # Draw bounding box (on display frame only)
                 x1, y1, x2, y2 = detection.bbox
                 color = (0, 255, 0) if detection.confidence > 0.8 else (0, 255, 255)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
@@ -428,17 +446,21 @@ def main():
                 # Draw head pose axes
                 draw_head_pose_axes(frame, detection)
 
-                # Check if should capture keyframe
-                should_capture = selector.should_capture(detection, keyframe_candidates, frame)
+                # Show blur score for threshold tuning
+                blur_score = selector._compute_blur_score(clean_frame)
+                print(f"\rBlur: {blur_score:.1f} (thr: {selector.blur_threshold})", end="")
+
+                # Check if should capture keyframe (use clean frame for blur check)
+                should_capture = selector.should_capture(detection, keyframe_candidates, clean_frame)
 
                 if should_capture:
-                    # Create keyframe candidate
-                    cropped = detector.crop_face_region(frame, detection)
+                    # Create keyframe candidate from clean frame (no UI overlays)
+                    cropped = detector.crop_face_region(clean_frame, detection)
                     candidate = KeyframeCandidate(
                         frame=cropped,
                         head_pose=detection.head_pose,
                         timestamp=time.time(),
-                        quality_score=selector.compute_quality_score(frame, detection)
+                        quality_score=selector.compute_quality_score(clean_frame, detection)
                     )
                     keyframe_candidates.append(candidate)
                     last_keyframe_time = time.time()
@@ -479,6 +501,7 @@ def main():
                 break
             elif key == ord('r'):
                 keyframe_candidates.clear()
+                selector.reset()
                 print("Keyframe collection reset!")
             elif key == ord('s'):
                 filename = f"capture_{int(time.time())}.jpg"
@@ -492,8 +515,7 @@ def main():
                 print(f"All landmarks: {'ON' if show_all_landmarks else 'OFF'}")
             elif key == ord('e'):
                 if keyframe_candidates:
-                    output_dir = project_root / "storage" / "demo_keyframes"
-                    export_keyframes(keyframe_candidates, output_dir)
+                    export_keyframes(keyframe_candidates, export_dir)
                 else:
                     print("No keyframes to export! Capture some first.")
 

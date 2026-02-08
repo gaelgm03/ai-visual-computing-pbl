@@ -95,12 +95,12 @@ def draw_capture_ui(frame: np.ndarray, detection: Optional[FaceDetection],
         cv2.putText(frame, "No face detected - position your face in frame",
                     (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 1, cv2.LINE_AA)
 
-    # Keyframe count and progress bar
-    count_text = f"Keyframes: {status.total_frames}/{min_keyframes}"
+    # Target-based progress
+    count_text = f"Targets: {status.targets_captured}/{status.targets_total}"
     cv2.putText(frame, count_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (255, 255, 255), 1, cv2.LINE_AA)
 
-    progress = min(1.0, status.total_frames / min_keyframes)
+    progress = status.targets_captured / max(status.targets_total, 1)
     bar_width = 150
     bar_x = 180
     cv2.rectangle(frame, (bar_x, 40), (bar_x + bar_width, 55), (100, 100, 100), -1)
@@ -118,13 +118,14 @@ def draw_capture_ui(frame: np.ndarray, detection: Optional[FaceDetection],
                     cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3, cv2.LINE_AA)
 
     # Instructions at bottom
-    if status.total_frames >= min_keyframes:
-        cv2.putText(frame, "Press ENTER to start 3D reconstruction, or continue capturing",
+    if status.is_sufficient:
+        cv2.putText(frame, "All targets captured! Press ENTER for 3D reconstruction",
                     (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
-    elif status.missing_directions:
-        dirs_text = "Turn: " + ", ".join(status.missing_directions)
-        cv2.putText(frame, dirs_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7, (0, 255, 255), 2, cv2.LINE_AA)
+    elif status.next_target:
+        t_yaw, t_pitch = status.next_target
+        guide_text = f"Align to Yaw={t_yaw:+.0f}, Pitch={t_pitch:+.0f} (keep Roll near 0)"
+        cv2.putText(frame, guide_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
 
 def capture_keyframes(detector: FaceDetector, selector: KeyframeSelector,
@@ -206,6 +207,7 @@ def capture_keyframes(detector: FaceDetector, selector: KeyframeSelector,
                 break
             elif key == ord('r'):
                 keyframes.clear()
+                selector.reset()
                 print("Keyframe collection reset.")
             elif key == ord(' ') and detection is not None:
                 # Force capture
@@ -250,12 +252,13 @@ def run_reconstruction(keyframes: List[KeyframeCandidate]):
         print("Loading MASt3R model (this may take 30-60 seconds)...")
         engine.load_model()
 
-    # Extract frames
+    # Extract frames and head poses
     frames = [kf.frame for kf in keyframes]
+    head_poses = [kf.head_pose for kf in keyframes]
     print(f"Running reconstruction with {len(frames)} frames...")
 
     start_time = time.time()
-    result = engine.reconstruct_multiview(frames)
+    result = engine.reconstruct_multiview(frames, head_poses=head_poses)
     elapsed = time.time() - start_time
 
     print(f"Reconstruction complete in {elapsed:.1f} seconds!")
@@ -284,7 +287,7 @@ def visualize_point_cloud(points: np.ndarray, colors: Optional[np.ndarray],
     print("=" * 60)
 
     # Subsample for performance
-    max_points = 20000
+    max_points = 50000
     if len(points) > max_points:
         idx = np.random.choice(len(points), max_points, replace=False)
         points = points[idx]

@@ -374,6 +374,14 @@ class FaceDetector:
         yaw = float(euler_angles[1][0])
         roll = float(euler_angles[2][0])
 
+        # Normalize roll only: decomposeProjectionMatrix can return roll near
+        # ±180° for an upright face. Bring it to [-90, 90] without touching
+        # yaw/pitch (which are stable and correct in this representation).
+        if roll > 90:
+            roll -= 180
+        elif roll < -90:
+            roll += 180
+
         return (yaw, pitch, roll)
 
     def _estimate_confidence(

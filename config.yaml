@@ -66,9 +66,29 @@ global_alignment:
   subsample: 8                # Subsampling factor for correspondences
   lr1: 0.07                   # Learning rate for coarse alignment
   niter1: 300                 # Iterations for coarse alignment
-  lr2: 0.01                   # Learning rate for refinement
-  niter2: 300                 # Iterations for refinement
+  lr2: 0.014                  # Learning rate for refinement (increased for better convergence)
+  niter2: 500                 # Iterations for refinement (increased: fine loss plateaus at 300)
   cache_dir: "storage/alignment_cache"  # Cache for intermediate results
+
+# ============================================================
+# Post-Processing Configuration (CS-1)
+# Controls noise removal pipeline after 3D reconstruction:
+#   confidence filter → voxel dedup → outlier removal → cluster filter
+# ============================================================
+post_processing:
+  confidence_threshold: 1.5     # MASt3R conf >= this kept (>1 reliable, 1.0-1.5 marginal)
+
+  dedup:
+    distance_threshold: 0.01    # Voxel size in meters (10mm merges double-layer artifacts)
+    max_points: 200000          # Hard cap after dedup (keep highest confidence)
+
+  outlier_removal:
+    k_neighbors: 30             # K for mean k-NN distance calculation
+    std_ratio: 1.2              # Remove if mean_dist > global_mean + std_ratio * global_std
+
+  cluster_filter:
+    k_neighbors: 10             # K for building connectivity graph
+    eps: 0.011                  # Max edge distance in meters (tightened from 0.02 for less side noise)
 
 # ============================================================
 # Face Detection Configuration (CS-1)
@@ -77,7 +97,7 @@ face_detection:
   model: "mediapipe"          # or "dlib"
   min_detection_confidence: 0.9
   min_tracking_confidence: 0.5
-  face_padding: 0.3           # padding around face bbox
+  face_padding: 0.3           # padding around face bbox (0.3 is optimal: enough face detail, minimal background shift)
 
 # ============================================================
 # Keyframe Selection Configuration (CS-1)
@@ -87,7 +107,7 @@ keyframe:
   min_yaw_spread: 40.0
   min_pitch_spread: 20.0
   pose_novelty_threshold: 5.0  # min degrees delta for new keyframe
-  blur_threshold: 100.0        # Laplacian variance threshold
+  blur_threshold: 15.0         # Laplacian variance threshold (clean frame without UI overlays)
   auto_export: true            # Auto-save keyframes when target_count reached
   export_dir: "storage/demo_keyframes"
 

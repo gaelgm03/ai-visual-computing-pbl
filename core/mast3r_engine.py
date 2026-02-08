@@ -388,45 +388,80 @@ class MASt3REngine:
         )
 
     @staticmethod
-    def generate_pair_indices(n_frames: int) -> List[Tuple[int, int]]:
+    def generate_pair_indices(
+        n_frames: int,
+        head_poses: Optional[List[Tuple[float, float, float]]] = None,
+        min_neighbors: int = 3,
+        max_neighbors: int = 8,
+    ) -> List[Tuple[int, int]]:
         """
-        Generate a reasonable set of image pair indices for multi-view reconstruction.
+        Generate image pair indices for multi-view reconstruction.
 
-        The strategy balances reconstruction quality with computational cost:
-        - Sequential pairs: Capture temporal coherence (frame N with frame N+1)
-        - Skip-one pairs: Wider baseline for better triangulation
-        - Loop closure: Connect first and last frames for global consistency
+        When head_poses are provided, uses angular proximity to pair each
+        frame with its K nearest neighbors (K between min_neighbors and
+        max_neighbors). This avoids pairing frames with very different
+        viewing angles (e.g., left profile vs right profile) which produce
+        poor matches, while ensuring sufficient connectivity.
+
+        When head_poses are not provided, falls back to all-pairs for
+        small frame counts or sequential+skip for larger counts.
 
         Args:
             n_frames: Total number of input frames.
+            head_poses: Optional list of (yaw, pitch, roll) per frame.
+                        When provided, enables angular proximity pairing.
+            min_neighbors: Minimum neighbors per frame (default 3).
+            max_neighbors: Maximum neighbors per frame (default 8).
 
         Returns:
             List of (i, j) index pairs indicating which frames to compare.
-
-        Example:
-            # For 12 frames, generates approximately 24 pairs:
-            pairs = MASt3REngine.generate_pair_indices(12)
-            # [(0,1), (1,2), ..., (10,11),  # 11 sequential
-            #  (0,2), (1,3), ..., (9,11),   # 10 skip-one
-            #  (0,11)]                       # 1 loop closure
-            # Total: 22 pairs (not 66 if we did all combinations!)
         """
         if n_frames < 2:
             return []
 
-        pairs = []
+        # Pose-aware pairing: pair each frame with angularly-close neighbors
+        if head_poses is not None and len(head_poses) == n_frames:
+            import math
+            pair_set = set()
+            k = min(max_neighbors, n_frames - 1)
+            k = max(k, min_neighbors)
 
-        # Sequential pairs: (0,1), (1,2), (2,3), ...
+            for i in range(n_frames):
+                yi, pi, _ = head_poses[i]
+                # Compute angular distance to all other frames
+                distances = []
+                for j in range(n_frames):
+                    if j == i:
+                        continue
+                    yj, pj, _ = head_poses[j]
+                    dist = math.sqrt((yi - yj) ** 2 + (pi - pj) ** 2)
+                    distances.append((dist, j))
+
+                # Sort by distance and take K nearest
+                distances.sort()
+                for _, j in distances[:k]:
+                    pair = (min(i, j), max(i, j))
+                    pair_set.add(pair)
+
+            pairs = sorted(pair_set)
+            logger.info(f"Pose-aware pairing: {len(pairs)} pairs "
+                        f"(K={k} neighbors per frame)")
+            return pairs
+
+        # Fallback: all-pairs for small frame counts
+        if n_frames <= 20:
+            pairs = []
+            for i in range(n_frames):
+                for j in range(i + 1, n_frames):
+                    pairs.append((i, j))
+            return pairs
+
+        # For larger counts, use sequential + skip + loop closure
+        pairs = []
         for i in range(n_frames - 1):
             pairs.append((i, i + 1))
-
-        # Skip-one pairs: (0,2), (1,3), (2,4), ...
-        # Wider baseline helps with 3D triangulation
         for i in range(n_frames - 2):
             pairs.append((i, i + 2))
-
-        # Loop closure: connect first and last frame
-        # This improves global consistency
         if n_frames > 3:
             pairs.append((0, n_frames - 1))
 
@@ -436,7 +471,8 @@ class MASt3REngine:
         self,
         frames: List[np.ndarray],
         pairs: Optional[List[Tuple[int, int]]] = None,
-        confidence_threshold: float = 0.5,
+        head_poses: Optional[List[Tuple[float, float, float]]] = None,
+        confidence_threshold: Optional[float] = None,
         use_global_alignment: bool = True,
         global_alignment_config: Optional[Dict[str, Any]] = None,
     ) -> MultiViewResult:
@@ -461,8 +497,12 @@ class MASt3REngine:
                     Each should be a cropped face from keyframe selection.
             pairs: Optional list of (i, j) pairs specifying which frames
                    to compare. If None, auto-generated using generate_pair_indices.
+            head_poses: Optional list of (yaw, pitch, roll) per frame.
+                        When provided and pairs is None, enables angular
+                        proximity pairing instead of all-pairs.
             confidence_threshold: Minimum confidence to include a point.
                                   Points below this are filtered out.
+                                  If None, reads from config.yaml post_processing section.
             use_global_alignment: If True (default), use MASt3R-SfM's
                                   sparse_global_alignment for proper
                                   coordinate unification. If False, use
@@ -481,12 +521,10 @@ class MASt3REngine:
         Example:
             # From keyframe candidates
             frames = [kf.frame for kf in keyframe_candidates]
+            poses = [kf.head_pose for kf in keyframe_candidates]
 
-            # With global alignment (recommended)
-            result = engine.reconstruct_multiview(frames)
-
-            # Without global alignment (for testing)
-            result = engine.reconstruct_multiview(frames, use_global_alignment=False)
+            # With pose-aware pairing (recommended)
+            result = engine.reconstruct_multiview(frames, head_poses=poses)
 
             print(f"Reconstructed {len(result.point_cloud)} points")
         """
@@ -495,9 +533,18 @@ class MASt3REngine:
         if len(frames) < 2:
             raise ValueError("At least 2 frames required for reconstruction.")
 
+        # Load post-processing config for defaults
+        if confidence_threshold is None:
+            try:
+                from core.config import get_post_processing_config
+                pp_config = get_post_processing_config()
+                confidence_threshold = pp_config.get("confidence_threshold", 1.5)
+            except (ImportError, KeyError):
+                confidence_threshold = 1.5
+
         # Generate pairs if not provided
         if pairs is None:
-            pairs = self.generate_pair_indices(len(frames))
+            pairs = self.generate_pair_indices(len(frames), head_poses=head_poses)
 
         logger.info(f"Reconstructing from {len(frames)} frames, {len(pairs)} pairs")
         logger.info(f"Using global alignment: {use_global_alignment}")
@@ -579,13 +626,52 @@ class MASt3REngine:
         colors = alignment_result.colors
         confidence = alignment_result.confidence
 
-        # Apply confidence threshold
+        # Load post-processing parameters from config
+        try:
+            from core.config import get_post_processing_config
+            pp = get_post_processing_config()
+        except (ImportError, KeyError):
+            pp = {}
+
+        dedup_cfg = pp.get("dedup", {})
+        outlier_cfg = pp.get("outlier_removal", {})
+        cluster_cfg = pp.get("cluster_filter", {})
+
+        # Apply confidence threshold (MASt3R uses c > 1 as reliable)
         mask = confidence >= confidence_threshold
         point_cloud = point_cloud[mask]
         colors = colors[mask]
         confidence = confidence[mask]
 
-        logger.info(f"Global alignment complete: {len(point_cloud)} points")
+        logger.info(f"After confidence filtering (>={confidence_threshold}): "
+                    f"{len(point_cloud):,} points")
+
+        # Deduplicate overlapping points from multiple views
+        if len(point_cloud) > 0:
+            dummy_desc = np.zeros((len(point_cloud), 1), dtype=np.float32)
+            point_cloud, colors, dummy_desc, confidence = self._deduplicate_points(
+                point_cloud, colors, dummy_desc, confidence,
+                distance_threshold=dedup_cfg.get("distance_threshold", 0.01),
+                max_points=dedup_cfg.get("max_points", 200000),
+            )
+
+        # Remove statistical outliers (scattered noise far from face surface)
+        if len(point_cloud) > 100:
+            point_cloud, colors, confidence = self._remove_statistical_outliers(
+                point_cloud, colors, confidence,
+                k_neighbors=outlier_cfg.get("k_neighbors", 30),
+                std_ratio=outlier_cfg.get("std_ratio", 1.5),
+            )
+
+        # Keep only the largest connected cluster (removes scattered debris)
+        if len(point_cloud) > 100:
+            point_cloud, colors, confidence = self._filter_largest_cluster(
+                point_cloud, colors, confidence,
+                k_neighbors=cluster_cfg.get("k_neighbors", 10),
+                eps=cluster_cfg.get("eps", 0.015),
+            )
+
+        logger.info(f"Global alignment complete: {len(point_cloud):,} points")
 
         # For descriptors, we need to run pairwise inference and collect them
         # This is done after alignment to use the aligned coordinate system
@@ -815,6 +901,87 @@ class MASt3REngine:
             logger.info(f"After max_points limit: {len(result_points):,} points")
 
         return result_points, result_colors, result_descriptors, result_confidence
+
+    @staticmethod
+    def _remove_statistical_outliers(
+        points: np.ndarray,
+        colors: np.ndarray,
+        confidence: np.ndarray,
+        k_neighbors: int = 30,
+        std_ratio: float = 1.5,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Remove points whose mean distance to k-nearest neighbors exceeds
+        mean + std_ratio * std, indicating they are noise/outliers.
+        """
+        from scipy.spatial import cKDTree
+
+        n_before = len(points)
+        tree = cKDTree(points)
+        dists, _ = tree.query(points, k=k_neighbors + 1)  # +1 for self
+        mean_dists = dists[:, 1:].mean(axis=1)
+
+        global_mean = mean_dists.mean()
+        global_std = mean_dists.std()
+        threshold = global_mean + std_ratio * global_std
+
+        inlier_mask = mean_dists < threshold
+        logger.info(f"Outlier removal: {n_before:,} -> {inlier_mask.sum():,} points "
+                    f"(removed {n_before - inlier_mask.sum():,})")
+
+        return points[inlier_mask], colors[inlier_mask], confidence[inlier_mask]
+
+    @staticmethod
+    def _filter_largest_cluster(
+        points: np.ndarray,
+        colors: np.ndarray,
+        confidence: np.ndarray,
+        k_neighbors: int = 10,
+        eps: float = 0.02,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Keep only the largest connected cluster of points.
+
+        Removes small scattered groups of noise that survive statistical
+        outlier removal because they are internally dense.
+
+        Uses k-NN graph connectivity: two points are connected if they
+        are mutual k-nearest neighbors within distance eps.
+        """
+        from scipy.spatial import cKDTree
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        n = len(points)
+        if n < 100:
+            return points, colors, confidence
+
+        tree = cKDTree(points)
+        dists, indices = tree.query(points, k=k_neighbors + 1)
+
+        # Build sparse adjacency: connect to neighbors within eps
+        rows = np.repeat(np.arange(n), k_neighbors)
+        cols = indices[:, 1:].ravel()
+        valid = dists[:, 1:].ravel() < eps
+
+        adj = csr_matrix(
+            (np.ones(valid.sum()), (rows[valid], cols[valid])),
+            shape=(n, n),
+        )
+
+        n_components, labels = connected_components(adj, directed=False)
+
+        # Keep only the largest component
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        largest = unique_labels[np.argmax(counts)]
+        mask = labels == largest
+
+        n_removed = n - mask.sum()
+        if n_removed > 0:
+            logger.info(f"Cluster filter: {n:,} -> {mask.sum():,} points "
+                        f"(removed {n_removed:,} in {n_components - 1} small clusters)")
+
+        return points[mask], colors[mask], confidence[mask]
 
     def get_gpu_memory_info(self) -> Dict[str, float]:
         """
