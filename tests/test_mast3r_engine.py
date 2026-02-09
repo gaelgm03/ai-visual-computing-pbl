@@ -181,8 +181,9 @@ class TestPairGeneration:
         # Check loop closure
         assert (0, 11) in pairs, "Missing loop closure pair"
 
-        # Expected: 11 sequential + 10 skip-one + 1 loop = 22 pairs
-        assert len(pairs) == 22
+        # For n_frames <= 20, implementation uses all-pairs for better reconstruction
+        # C(12, 2) = 12 * 11 / 2 = 66 pairs
+        assert len(pairs) == 66, f"Expected all-pairs (66), got {len(pairs)}"
 
     def test_generate_pairs_single_frame(self):
         """Test that single frame returns empty list."""

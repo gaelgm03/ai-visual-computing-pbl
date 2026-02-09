@@ -6,7 +6,8 @@ Handles 3D point cloud visualization and match overlay display.
 """
 
 import numpy as np
-from typing import Optional, Dict, List, Tuple
+import plotly.graph_objects as go
+from typing import Optional, Dict, List, Tuple, Union
 from dataclasses import dataclass
 
 
@@ -55,7 +56,7 @@ class PointCloudVisualizer:
         data: PointCloudData,
         title: str = "3D Face Point Cloud",
         point_size: float = 1.5,
-    ) -> Dict:
+    ) -> go.Figure:
         """
         Create a Plotly figure dict for the point cloud.
         
@@ -84,41 +85,35 @@ class PointCloudVisualizer:
                 for z in z_norm
             ]
         
-        figure = {
-            "data": [{
-                "type": "scatter3d",
-                "x": pts[:, 0].tolist(),
-                "y": pts[:, 1].tolist(),
-                "z": pts[:, 2].tolist(),
-                "mode": "markers",
-                "marker": {
-                    "size": point_size,
-                    "color": colors,
-                },
-                "hoverinfo": "skip",
-            }],
-            "layout": {
-                "title": title,
-                "scene": {
-                    "aspectmode": "data",
-                    "xaxis": {"title": "X"},
-                    "yaxis": {"title": "Y"},
-                    "zaxis": {"title": "Z"},
-                },
-                "margin": {"l": 0, "r": 0, "t": 40, "b": 0},
-                "width": 500,
-                "height": 400,
-            }
-        }
-        
-        return figure
+        fig = go.Figure()
+        fig.add_trace(go.Scatter3d(
+            x=pts[:, 0].tolist(),
+            y=pts[:, 1].tolist(),
+            z=pts[:, 2].tolist(),
+            mode="markers",
+            marker=dict(size=point_size, color=colors),
+            hoverinfo="skip",
+        ))
+        fig.update_layout(
+            title=title,
+            scene=dict(
+                aspectmode="data",
+                xaxis=dict(title="X"),
+                yaxis=dict(title="Y"),
+                zaxis=dict(title="Z"),
+            ),
+            margin=dict(l=0, r=0, t=40, b=0),
+            width=500,
+            height=400,
+        )
+        return fig
     
     def create_comparison_figure(
         self,
         template: PointCloudData,
         probe: PointCloudData,
         matched_pairs: Optional[List[Tuple[int, int]]] = None,
-    ) -> Dict:
+    ) -> go.Figure:
         """
         Create a side-by-side or overlaid comparison of template and probe.
         
@@ -138,60 +133,55 @@ class PointCloudVisualizer:
         probe_shifted = probe.points.copy()
         probe_shifted[:, 0] += offset
         
-        traces = [
-            {
-                "type": "scatter3d",
-                "x": template.points[:, 0].tolist(),
-                "y": template.points[:, 1].tolist(),
-                "z": template.points[:, 2].tolist(),
-                "mode": "markers",
-                "marker": {"size": 1.5, "color": "blue"},
-                "name": "Template",
-            },
-            {
-                "type": "scatter3d",
-                "x": probe_shifted[:, 0].tolist(),
-                "y": probe_shifted[:, 1].tolist(),
-                "z": probe_shifted[:, 2].tolist(),
-                "mode": "markers",
-                "marker": {"size": 1.5, "color": "red"},
-                "name": "Probe",
-            },
-        ]
-        
-        return {
-            "data": traces,
-            "layout": {
-                "title": "Template vs Probe Comparison",
-                "scene": {"aspectmode": "data"},
-                "margin": {"l": 0, "r": 0, "t": 40, "b": 0},
-                "width": 700,
-                "height": 400,
-            }
-        }
+        fig = go.Figure()
+        fig.add_trace(go.Scatter3d(
+            x=template.points[:, 0].tolist(),
+            y=template.points[:, 1].tolist(),
+            z=template.points[:, 2].tolist(),
+            mode="markers",
+            marker=dict(size=1.5, color="blue"),
+            name="Template",
+        ))
+        fig.add_trace(go.Scatter3d(
+            x=probe_shifted[:, 0].tolist(),
+            y=probe_shifted[:, 1].tolist(),
+            z=probe_shifted[:, 2].tolist(),
+            mode="markers",
+            marker=dict(size=1.5, color="red"),
+            name="Probe",
+        ))
+        fig.update_layout(
+            title="Template vs Probe Comparison",
+            scene=dict(aspectmode="data"),
+            margin=dict(l=0, r=0, t=40, b=0),
+            width=700,
+            height=400,
+        )
+        return fig
     
     @staticmethod
-    def create_empty_figure(message: str = "No point cloud data") -> Dict:
+    def create_empty_figure(message: str = "No point cloud data") -> go.Figure:
         """Create an empty placeholder figure."""
-        return {
-            "data": [],
-            "layout": {
-                "title": message,
-                "xaxis": {"visible": False},
-                "yaxis": {"visible": False},
-                "annotations": [{
-                    "text": message,
-                    "xref": "paper",
-                    "yref": "paper",
-                    "x": 0.5,
-                    "y": 0.5,
-                    "showarrow": False,
-                    "font": {"size": 16, "color": "gray"},
-                }],
-                "width": 500,
-                "height": 400,
-            }
-        }
+        fig = go.Figure()
+        fig.update_layout(
+            title=message,
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            annotations=[
+                dict(
+                    text=message,
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.5,
+                    showarrow=False,
+                    font=dict(size=16, color="gray"),
+                )
+            ],
+            width=500,
+            height=400,
+        )
+        return fig
 
 
 def load_npz_point_cloud(filepath: str) -> Optional[PointCloudData]:

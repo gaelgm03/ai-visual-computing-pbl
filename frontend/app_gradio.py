@@ -9,6 +9,7 @@ Run with: python -m frontend.app_gradio
 import gradio as gr
 import numpy as np
 import cv2
+import plotly.graph_objects as go
 from typing import Optional, Tuple, List
 import time
 
@@ -27,6 +28,28 @@ enrollment_guide = EnrollmentGuide(EnrollmentConfig(target_frames=12))
 auth_panel = AuthPanel(AuthConfig())
 visualizer = PointCloudVisualizer(max_points=10000)
 api_client = get_api_client()
+
+# Auto-detect backend and switch to LIVE mode if available
+_backend_available = False
+def init_api_client():
+    """Initialize API client with auto-detection of backend."""
+    global _backend_available
+    if api_client.check_backend_available():
+        api_client.set_mode(ConnectionMode.LIVE)
+        _backend_available = True
+        print("[app_gradio] Backend detected - using LIVE mode")
+    else:
+        api_client.set_mode(ConnectionMode.MOCK)
+        _backend_available = False
+        print("[app_gradio] Backend not available - using MOCK mode")
+    return _backend_available
+
+# Try to connect on startup
+try:
+    init_api_client()
+except Exception as e:
+    print(f"[app_gradio] Backend detection failed: {e}")
+    _backend_available = False
 
 # Enrollment state
 _enrollment_active = False
@@ -239,34 +262,32 @@ def create_coverage_plot():
     yaws = [p["yaw"] for p in coverage["poses"]]
     pitches = [p["pitch"] for p in coverage["poses"]]
     
-    figure = {
-        "data": [{
-            "type": "scatter",
-            "x": yaws,
-            "y": pitches,
-            "mode": "markers",
-            "marker": {"size": 10, "color": "blue"},
-            "name": "Captured",
-        }],
-        "layout": {
-            "title": f"Head Pose Coverage ({coverage['progress_percent']:.0f}%)",
-            "xaxis": {"title": "Yaw (°)", "range": [-40, 40]},
-            "yaxis": {"title": "Pitch (°)", "range": [-20, 20]},
-            "width": 350,
-            "height": 250,
-            "shapes": [
-                # Target coverage rectangle
-                {
-                    "type": "rect",
-                    "x0": -30, "x1": 30,
-                    "y0": -15, "y1": 15,
-                    "line": {"color": "green", "dash": "dash"},
-                    "fillcolor": "rgba(0,255,0,0.1)",
-                }
-            ],
-        }
-    }
-    return figure
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=yaws,
+        y=pitches,
+        mode="markers",
+        marker=dict(size=10, color="blue"),
+        name="Captured",
+    ))
+    
+    fig.update_layout(
+        title=f"Head Pose Coverage ({coverage['progress_percent']:.0f}%)",
+        xaxis=dict(title="Yaw (°)", range=[-40, 40]),
+        yaxis=dict(title="Pitch (°)", range=[-20, 20]),
+        width=350,
+        height=250,
+        shapes=[
+            dict(
+                type="rect",
+                x0=-30, x1=30,
+                y0=-15, y1=15,
+                line=dict(color="green", dash="dash"),
+                fillcolor="rgba(0,255,0,0.1)",
+            )
+        ],
+    )
+    return fig
 
 
 def create_live_cloud_plot():
@@ -320,6 +341,79 @@ Template saved to: `{result.get('template_path', 'storage/templates/')}`
 
 
 # ============================================================
+# User Management Functions
+# ============================================================
+
+def fetch_users_list() -> List[List[str]]:
+    """
+    Fetch enrolled users from the backend.
+    Returns data formatted for Gradio Dataframe.
+    """
+    users = api_client.list_users()
+    if not users:
+        return []
+    
+    return [
+        [u.get("user_id", ""), u.get("name", u.get("user_name", "")), u.get("enrolled_at", "")]
+        for u in users
+    ]
+
+
+def fetch_user_choices() -> List[str]:
+    """
+    Fetch user names for dropdown choices.
+    Returns list of "user_name (user_id)" strings.
+    """
+    users = api_client.list_users()
+    if not users:
+        return []
+    
+    return [
+        f"{u.get('name', u.get('user_name', 'Unknown'))} ({u.get('user_id', '')})"
+        for u in users
+    ]
+
+
+def refresh_users():
+    """
+    Refresh user table and dropdown choices.
+    Called by refresh button.
+    """
+    users_data = fetch_users_list()
+    user_choices = fetch_user_choices()
+    
+    status_msg = f"Found {len(users_data)} enrolled user(s)"
+    if not _backend_available:
+        status_msg += " (MOCK mode - start backend for real data)"
+    
+    return users_data, gr.update(choices=user_choices), status_msg
+
+
+def delete_user(user_id: str):
+    """
+    Delete a user by ID.
+    """
+    if not user_id or not user_id.strip():
+        return "⚠️ Please enter a User ID to delete", fetch_users_list()
+    
+    user_id = user_id.strip()
+    success = api_client.delete_user(user_id)
+    
+    if success:
+        return f"✅ User `{user_id}` deleted successfully", fetch_users_list()
+    else:
+        return f"❌ Failed to delete user `{user_id}` (not found or error)", fetch_users_list()
+
+
+def get_connection_status() -> str:
+    """Get current connection status message."""
+    if _backend_available:
+        return "**Status**: 🟢 Connected to backend (LIVE mode)"
+    else:
+        return "**Status**: 🟡 Demo mode (backend not connected)"
+
+
+# ============================================================
 # Authentication Tab Functions
 # ============================================================
 
@@ -333,8 +427,11 @@ def authenticate(frame: Optional[np.ndarray], selected_user: Optional[str]):
     if not selected_user:
         return "⚠️ Please select a user to authenticate against", None
     
+    # Extract user name from dropdown format "name (user_id)"
+    target_user = selected_user.split(" (")[0] if " (" in selected_user else selected_user
+    
     # Send to API (mock or live)
-    api_result = api_client.authenticate([frame], target_user=selected_user)
+    api_result = api_client.authenticate([frame], target_user=target_user)
     
     # Convert API response to AuthResult for display
     result = AuthResult(
@@ -412,9 +509,9 @@ def create_demo():
         # 🔐 MASt3R Face Authentication System
         
         A Face ID-like prototype using MASt3R 3D reconstruction for secure face authentication.
-        
-        **Status**: Demo mode (backend API not connected)
         """)
+        
+        connection_status = gr.Markdown(get_connection_status())
         
         with gr.Tabs():
             # ==================== ENROLLMENT TAB ====================
@@ -470,10 +567,11 @@ def create_demo():
                 
                 with gr.Row():
                     with gr.Column(scale=2):
-                        # Placeholder user list (will be populated from API)
+                        auth_refresh_btn = gr.Button("🔄 Refresh User List", size="sm")
+                        
                         user_dropdown = gr.Dropdown(
                             label="Select User",
-                            choices=["Alice", "Bob", "Charlie"],  # Placeholder
+                            choices=fetch_user_choices(),
                             value=None,
                         )
                         
@@ -489,6 +587,15 @@ def create_demo():
                         auth_result = gr.Markdown("Select a user and capture your face to authenticate.")
                         score_plot = gr.Plot(label="Match Scores")
                 
+                def refresh_auth_users():
+                    return gr.update(choices=fetch_user_choices())
+                
+                auth_refresh_btn.click(
+                    fn=refresh_auth_users,
+                    inputs=[],
+                    outputs=[user_dropdown],
+                )
+                
                 auth_btn.click(
                     fn=authenticate,
                     inputs=[auth_webcam, user_dropdown],
@@ -501,54 +608,87 @@ def create_demo():
                 gr.Markdown("View and manage enrolled users.")
                 
                 refresh_btn = gr.Button("🔄 Refresh User List")
+                users_status = gr.Markdown("")
                 user_table = gr.Dataframe(
                     headers=["User ID", "Name", "Enrolled At"],
                     datatype=["str", "str", "str"],
-                    value=[
-                        ["usr_001", "Alice", "2026-02-01 10:00"],
-                        ["usr_002", "Bob", "2026-02-02 14:30"],
-                    ],  # Placeholder data
+                    value=fetch_users_list(),
                     interactive=False,
                 )
                 
                 with gr.Row():
-                    selected_user_id = gr.Textbox(label="User ID to Delete")
+                    selected_user_id = gr.Textbox(label="User ID to Delete", placeholder="e.g., usr_0001")
                     delete_btn = gr.Button("🗑️ Delete User", variant="stop")
                 
                 delete_status = gr.Markdown("")
+                
+                refresh_btn.click(
+                    fn=refresh_users,
+                    inputs=[],
+                    outputs=[user_table, user_dropdown, users_status],
+                )
+                
+                delete_btn.click(
+                    fn=delete_user,
+                    inputs=[selected_user_id],
+                    outputs=[delete_status, user_table],
+                )
             
             # ==================== VISUALIZATION TAB ====================
             with gr.TabItem("📊 3D Viewer"):
                 gr.Markdown("### Point Cloud Visualization")
                 gr.Markdown("View enrolled face templates as 3D point clouds.")
                 
-                viz_user_dropdown = gr.Dropdown(
-                    label="Select User",
-                    choices=["Alice", "Bob"],  # Placeholder
-                )
+                with gr.Row():
+                    viz_user_dropdown = gr.Dropdown(
+                        label="Select User",
+                        choices=fetch_user_choices(),
+                    )
+                    viz_refresh_btn = gr.Button("🔄", size="sm", scale=0)
                 load_cloud_btn = gr.Button("Load Point Cloud")
+                
+                def refresh_viz_users():
+                    return gr.update(choices=fetch_user_choices())
+                
+                viz_refresh_btn.click(
+                    fn=refresh_viz_users,
+                    inputs=[],
+                    outputs=[viz_user_dropdown],
+                )
                 
                 cloud_viewer = gr.Plot(label="3D Point Cloud")
                 
-                # Placeholder: load demo point cloud
-                def load_demo_cloud(user_name):
-                    if not user_name:
+                def load_user_cloud(user_selection):
+                    if not user_selection:
                         return visualizer.create_empty_figure("Select a user")
-                    dummy = PointCloudData(
-                        points=np.random.randn(2000, 3).astype(np.float32) * 0.1,
-                        colors=(np.random.rand(2000, 3) * 255).astype(np.uint8),
-                    )
-                    return visualizer.create_plotly_figure(dummy, f"{user_name}'s Face")
+                    
+                    # Extract user_id from "name (user_id)" format
+                    if " (" in user_selection and user_selection.endswith(")"):
+                        user_id = user_selection.split(" (")[-1].rstrip(")")
+                    else:
+                        user_id = user_selection
+                    
+                    # Try to get template from API
+                    template_data = api_client.get_user_template(user_id)
+                    
+                    if template_data and template_data.get("points") is not None:
+                        points = template_data["points"]
+                        colors = template_data.get("colors")
+                        user_name = user_selection.split(" (")[0]
+                        data = PointCloudData(points=points, colors=colors)
+                        return visualizer.create_plotly_figure(data, f"{user_name}'s Face ({len(points):,} pts)")
+                    else:
+                        return visualizer.create_empty_figure("Could not load template")
                 
                 load_cloud_btn.click(
-                    fn=load_demo_cloud,
+                    fn=load_user_cloud,
                     inputs=[viz_user_dropdown],
                     outputs=[cloud_viewer],
                 )
         
         gr.Markdown("""
         ---
-        **Note**: This is a demo UI. Connect to the FastAPI backend for full functionality.
+        **Tip**: Start the backend with `uvicorn api.app:app --reload` to enable live mode.
         
         CS-2 | MASt3R Face Authentication PBL Project
         """)

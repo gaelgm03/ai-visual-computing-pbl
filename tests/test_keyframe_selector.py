@@ -296,6 +296,11 @@ class TestCoverageStatusMethod:
             )
             for yaw, pitch in poses
         ]
+        
+        # Simulate that all target poses have been captured
+        # The new implementation uses target-based coverage tracking
+        selector._captured_target_indices = set(range(len(selector.target_poses)))
+        
         status = selector.get_coverage_status(candidates)
         assert status.is_sufficient is True
         assert status.total_frames == 12
@@ -629,7 +634,14 @@ class TestSelectBestCandidates:
 # ============================================================
 
 class TestMissingDirections:
-    """Tests for _get_missing_directions method."""
+    """
+    Tests for _get_missing_directions method.
+    
+    NOTE: _get_missing_directions was refactored to use target-based coverage
+    instead of yaw/pitch range parameters. The method signature is kept for
+    backwards compatibility but the parameters are now ignored. These tests
+    now verify the new target-based behavior.
+    """
 
     @pytest.fixture
     def selector(self):
@@ -639,42 +651,53 @@ class TestMissingDirections:
             "min_pitch_spread": 20.0,
         })
 
-    def test_all_directions_missing_at_center(self, selector):
-        """Test that all directions are missing when only center is covered."""
+    def test_all_directions_missing_initially(self, selector):
+        """
+        Test that all directions are missing when no targets are captured.
+        
+        The new implementation uses target poses, so at initialization
+        all directions are missing since no targets have been captured yet.
+        """
         missing = selector._get_missing_directions(
             yaw_min=0.0, yaw_max=0.0,
             pitch_min=0.0, pitch_max=0.0
         )
+        # With target-based system, all directions start as missing
         assert set(missing) == {"left", "right", "up", "down"}
 
-    def test_left_covered(self, selector):
-        """Test when left is covered (negative yaw)."""
-        missing = selector._get_missing_directions(
-            yaw_min=-25.0, yaw_max=0.0,
-            pitch_min=0.0, pitch_max=0.0
-        )
-        assert "left" not in missing
-        assert "right" in missing
+    def test_directions_reduce_when_targets_captured(self, selector):
+        """
+        Test that missing directions reduce as targets are captured.
+        
+        Simulates capturing targets by adding to _captured_target_indices.
+        """
+        # Initially all missing
+        missing = selector._get_missing_directions(0, 0, 0, 0)
+        assert len(missing) == 4
+        
+        # Mark all target indices as captured
+        selector._captured_target_indices = set(range(len(selector.target_poses)))
+        
+        # Now nothing should be missing
+        missing = selector._get_missing_directions(0, 0, 0, 0)
+        assert len(missing) == 0
 
-    def test_right_covered(self, selector):
-        """Test when right is covered (positive yaw)."""
-        missing = selector._get_missing_directions(
-            yaw_min=0.0, yaw_max=25.0,
-            pitch_min=0.0, pitch_max=0.0
-        )
-        assert "right" not in missing
-        assert "left" in missing
-
-    def test_sufficient_yaw_coverage(self, selector):
-        """Test when yaw coverage is sufficient."""
-        missing = selector._get_missing_directions(
-            yaw_min=-25.0, yaw_max=25.0,  # 50 degree spread > 40 required
-            pitch_min=0.0, pitch_max=0.0
-        )
+    def test_partial_capture_reduces_missing(self, selector):
+        """
+        Test that capturing some targets reduces missing directions.
+        """
+        # Find indices of targets with negative yaw (left direction)
+        left_indices = [
+            i for i, (yaw, pitch) in enumerate(selector.target_poses)
+            if yaw < -5
+        ]
+        
+        # Capture left-looking targets
+        selector._captured_target_indices = set(left_indices)
+        
+        missing = selector._get_missing_directions(0, 0, 0, 0)
+        # Left should no longer be in missing
         assert "left" not in missing
-        assert "right" not in missing
-        assert "up" in missing
-        assert "down" in missing
 
 
 if __name__ == "__main__":

@@ -247,10 +247,10 @@ class TestAlignmentLogic:
             intrinsics=[np.eye(3) * 500],
         )
 
-        # Check bounds
-        x_range = result.point_cloud[:, 0].ptp()
-        y_range = result.point_cloud[:, 1].ptp()
-        z_range = result.point_cloud[:, 2].ptp()
+        # Check bounds (using np.ptp for NumPy 2.x compatibility)
+        x_range = np.ptp(result.point_cloud[:, 0])
+        y_range = np.ptp(result.point_cloud[:, 1])
+        z_range = np.ptp(result.point_cloud[:, 2])
 
         # Face dimensions should be reasonable (in meters)
         assert 0.1 < x_range < 0.5, f"X range {x_range} unreasonable for face"
