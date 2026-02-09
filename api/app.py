@@ -22,6 +22,7 @@ Author: CS-1
 
 import logging
 import torch
+import numpy as np
 from contextlib import asynccontextmanager
 from typing import List
 
@@ -197,6 +198,33 @@ async def get_user(user_id: str):
         template_path=user.get("template_path"),
         enrollment_metadata=enrollment_metadata,
     )
+
+
+@app.get("/users/{user_id}/template", tags=["users"])
+async def get_user_template(user_id: str):
+    """
+    Get a user's point cloud template for 3D visualization.
+
+    Returns subsampled points and colors for efficient transfer.
+    """
+    template_manager = get_template_manager()
+    template = template_manager.load_template(user_id)
+
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+
+    # Subsample for reasonable transfer size
+    max_points = 5000
+    n_total = len(template.point_cloud)
+    if n_total > max_points:
+        indices = np.random.choice(n_total, max_points, replace=False)
+        points = template.point_cloud[indices].tolist()
+        colors = template.colors[indices].tolist() if template.colors is not None else None
+    else:
+        points = template.point_cloud.tolist()
+        colors = template.colors.tolist() if template.colors is not None else None
+
+    return {"points": points, "colors": colors}
 
 
 @app.delete("/users/{user_id}", response_model=DeleteUserResponse, tags=["users"])
