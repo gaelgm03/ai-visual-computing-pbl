@@ -109,15 +109,32 @@ class NNDescriptorMatcher(DescriptorMatcher):
                 is_match=False,
             )
 
-        # 2. L2-normalize (critical: MASt3R descriptors are NOT unit-normalized)
+        # 2. Filter NaN/Inf descriptors (MASt3R can produce invalid values
+        #    from FP16 inference, image edges, or padding regions)
+        probe_desc, probe_cloud = self._filter_invalid(probe_desc, probe_cloud)
+        template_desc, template_cloud = self._filter_invalid(
+            template_desc, template_cloud
+        )
+
+        if len(probe_desc) < 5 or len(template_desc) < 5:
+            return MatchResult(
+                score=0.0,
+                details={
+                    "method": "nn_reciprocal",
+                    "error": "too few valid descriptors after NaN filtering",
+                },
+                is_match=False,
+            )
+
+        # 3. L2-normalize (critical: MASt3R descriptors are NOT unit-normalized)
         probe_norm = self._normalize(probe_desc)
         template_norm = self._normalize(template_desc)
 
-        # 3. Subsample
+        # 4. Subsample
         probe_norm, _ = self._subsample(probe_norm, probe_cloud)
         template_norm, _ = self._subsample(template_norm, template_cloud)
 
-        # 4. Nearest-neighbor search (GPU or CPU)
+        # 5. Nearest-neighbor search (GPU or CPU)
         # Primary: GPU matmul on Colab T4 / compatible CUDA GPUs
         # Fallback: CPU cKDTree (for envs where CUDA arch is incompatible)
         use_gpu = _HAS_CUDA and len(probe_norm) * len(template_norm) < 500_000_000
@@ -138,11 +155,14 @@ class NNDescriptorMatcher(DescriptorMatcher):
                 probe_norm, template_norm
             )
 
-        # 5. Reciprocal matching
+        # 6. Reciprocal matching (with bounds check as safety net against
+        #    any remaining invalid indices from edge cases)
+        n_template = len(template_norm)
+        n_probe = len(probe_norm)
         reciprocal_sims = []
-        for i in range(len(probe_norm)):
+        for i in range(n_probe):
             j = idx_p2t[i]
-            if idx_t2p[j] == i:
+            if 0 <= j < n_template and idx_t2p[j] == i:
                 reciprocal_sims.append(sims_p2t[i])
 
         n_reciprocal = len(reciprocal_sims)
@@ -154,7 +174,7 @@ class NNDescriptorMatcher(DescriptorMatcher):
         else:
             avg_similarity = 0.0
 
-        # 6. Combined score
+        # 7. Combined score
         score = float(
             self.match_ratio_weight * match_ratio
             + self.avg_similarity_weight * avg_similarity
@@ -179,6 +199,39 @@ class NNDescriptorMatcher(DescriptorMatcher):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _filter_invalid(
+        desc: np.ndarray, cloud: np.ndarray
+    ) -> tuple:
+        """
+        Remove rows containing NaN/Inf or zero-norm descriptors.
+
+        scipy cKDTree.query returns undefined indices for NaN inputs,
+        which causes IndexError in reciprocal matching. This filter
+        ensures all descriptor rows are finite and non-degenerate.
+        """
+        # Finite check (no NaN or Inf)
+        finite_mask = np.isfinite(desc).all(axis=1)
+        # Zero-norm check (degenerate descriptors)
+        norms = np.linalg.norm(desc, axis=1)
+        nonzero_mask = norms > 1e-8
+        valid = finite_mask & nonzero_mask
+
+        n_removed = len(desc) - valid.sum()
+        if n_removed > 0:
+            logger.info(
+                f"Filtered {n_removed} invalid descriptors "
+                f"({len(desc)} -> {valid.sum()})"
+            )
+
+        # Truncate cloud to desc length if they differ (architectural mismatch)
+        min_len = min(len(desc), len(cloud))
+        desc = desc[:min_len]
+        cloud = cloud[:min_len]
+        valid = valid[:min_len]
+
+        return desc[valid], cloud[valid]
 
     @staticmethod
     def _normalize(desc: np.ndarray) -> np.ndarray:

@@ -625,6 +625,8 @@ class MASt3REngine:
         point_cloud = alignment_result.point_cloud
         colors = alignment_result.colors
         confidence = alignment_result.confidence
+        # Paired descriptors from scene cache (None if cache unavailable)
+        descriptors = alignment_result.descriptors
 
         # Load post-processing parameters from config
         try:
@@ -642,43 +644,61 @@ class MASt3REngine:
         point_cloud = point_cloud[mask]
         colors = colors[mask]
         confidence = confidence[mask]
+        if descriptors is not None:
+            descriptors = descriptors[mask]
 
         logger.info(f"After confidence filtering (>={confidence_threshold}): "
                     f"{len(point_cloud):,} points")
 
         # Deduplicate overlapping points from multiple views
         if len(point_cloud) > 0:
-            dummy_desc = np.zeros((len(point_cloud), 1), dtype=np.float32)
-            point_cloud, colors, dummy_desc, confidence = self._deduplicate_points(
-                point_cloud, colors, dummy_desc, confidence,
-                distance_threshold=dedup_cfg.get("distance_threshold", 0.01),
-                max_points=dedup_cfg.get("max_points", 200000),
-            )
+            if descriptors is None:
+                dummy_desc = np.zeros((len(point_cloud), 1), dtype=np.float32)
+                point_cloud, colors, dummy_desc, confidence = self._deduplicate_points(
+                    point_cloud, colors, dummy_desc, confidence,
+                    distance_threshold=dedup_cfg.get("distance_threshold", 0.01),
+                    max_points=dedup_cfg.get("max_points", 200000),
+                )
+            else:
+                point_cloud, colors, descriptors, confidence = self._deduplicate_points(
+                    point_cloud, colors, descriptors, confidence,
+                    distance_threshold=dedup_cfg.get("distance_threshold", 0.01),
+                    max_points=dedup_cfg.get("max_points", 200000),
+                )
 
         # Remove statistical outliers (scattered noise far from face surface)
         if len(point_cloud) > 100:
-            point_cloud, colors, confidence = self._remove_statistical_outliers(
-                point_cloud, colors, confidence,
-                k_neighbors=outlier_cfg.get("k_neighbors", 30),
-                std_ratio=outlier_cfg.get("std_ratio", 1.5),
+            point_cloud, colors, confidence, descriptors = (
+                self._remove_statistical_outliers(
+                    point_cloud, colors, confidence,
+                    descriptors=descriptors,
+                    k_neighbors=outlier_cfg.get("k_neighbors", 30),
+                    std_ratio=outlier_cfg.get("std_ratio", 1.5),
+                )
             )
 
         # Keep only the largest connected cluster (removes scattered debris)
         if len(point_cloud) > 100:
-            point_cloud, colors, confidence = self._filter_largest_cluster(
-                point_cloud, colors, confidence,
-                k_neighbors=cluster_cfg.get("k_neighbors", 10),
-                eps=cluster_cfg.get("eps", 0.015),
+            point_cloud, colors, confidence, descriptors = (
+                self._filter_largest_cluster(
+                    point_cloud, colors, confidence,
+                    descriptors=descriptors,
+                    k_neighbors=cluster_cfg.get("k_neighbors", 10),
+                    eps=cluster_cfg.get("eps", 0.015),
+                )
             )
 
         logger.info(f"Global alignment complete: {len(point_cloud):,} points")
 
-        # For descriptors, we need to run pairwise inference and collect them
-        # This is done after alignment to use the aligned coordinate system
-        descriptors = self._extract_aligned_descriptors(
-            frames, pairs, alignment_result.camera_poses,
-            alignment_result.intrinsics, confidence_threshold
-        )
+        # If paired descriptors were not available from scene cache,
+        # fall back to separate pairwise extraction (unpaired, with NaN filtering)
+        if descriptors is None:
+            logger.info("No paired descriptors from scene; "
+                        "falling back to pairwise extraction")
+            descriptors = self._extract_aligned_descriptors(
+                frames, pairs, alignment_result.camera_poses,
+                alignment_result.intrinsics, confidence_threshold
+            )
 
         return MultiViewResult(
             point_cloud=point_cloud,
@@ -692,6 +712,7 @@ class MASt3REngine:
                 "confidence_threshold": confidence_threshold,
                 "pairs_processed": pairs,
                 "alignment_method": "sparse_global_alignment",
+                "descriptors_paired": alignment_result.descriptors is not None,
             }
         )
 
@@ -707,13 +728,18 @@ class MASt3REngine:
         Extract descriptors after global alignment.
 
         Since global alignment uses sparse correspondences, we run pairwise
-        inference to get dense descriptors and transform them using the
-        optimized camera poses.
+        inference to get dense descriptors. NaN/Inf and zero-norm descriptors
+        are filtered, and the result is subsampled to a reasonable size.
+
+        Note: These descriptors are NOT spatially paired with the global-
+        aligned point cloud (they come from separate pairwise inferences).
+        Spatial post-processing (dedup, outlier, cluster) cannot be applied
+        without proper coordinate alignment. A future improvement would
+        extract descriptors directly from the SparseGA scene object so they
+        pair 1:1 with the globally-aligned pts3d.
         """
         all_descriptors = []
 
-        # For efficiency, we only process the first pair to get descriptor dimension
-        # and then aggregate from all pairs
         for idx, (i, j) in enumerate(pairs):
             result = self.infer_pair(frames[i], frames[j])
 
@@ -722,8 +748,21 @@ class MASt3REngine:
             confidence_flat = result.confidence1.reshape(-1)
 
             # Filter by confidence
-            mask = confidence_flat >= confidence_threshold
-            all_descriptors.append(descriptors_flat[mask])
+            conf_mask = confidence_flat >= confidence_threshold
+            desc_filtered = descriptors_flat[conf_mask]
+
+            # Filter NaN/Inf values (FP16 inference can produce these)
+            if len(desc_filtered) > 0:
+                finite_mask = np.isfinite(desc_filtered).all(axis=1)
+                desc_filtered = desc_filtered[finite_mask]
+
+            # Filter zero-norm descriptors (degenerate, e.g. from padding)
+            if len(desc_filtered) > 0:
+                norms = np.linalg.norm(desc_filtered, axis=1)
+                desc_filtered = desc_filtered[norms > 1e-8]
+
+            if len(desc_filtered) > 0:
+                all_descriptors.append(desc_filtered)
 
             # Free memory
             del result
@@ -732,6 +771,18 @@ class MASt3REngine:
 
         if all_descriptors:
             descriptors = np.concatenate(all_descriptors, axis=0)
+
+            # Subsample if too many descriptors (performance + storage)
+            max_descriptors = 200_000
+            if len(descriptors) > max_descriptors:
+                idx = np.random.choice(
+                    len(descriptors), max_descriptors, replace=False
+                )
+                descriptors = descriptors[idx]
+                logger.info(f"Subsampled descriptors to {max_descriptors:,}")
+
+            logger.info(f"Extracted {len(descriptors):,} valid descriptors "
+                        f"from {len(pairs)} pairs")
         else:
             descriptors = np.zeros((0, 24), dtype=np.float32)
 
@@ -907,9 +958,10 @@ class MASt3REngine:
         points: np.ndarray,
         colors: np.ndarray,
         confidence: np.ndarray,
+        descriptors: Optional[np.ndarray] = None,
         k_neighbors: int = 30,
         std_ratio: float = 1.5,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """
         Remove points whose mean distance to k-nearest neighbors exceeds
         mean + std_ratio * std, indicating they are noise/outliers.
@@ -929,16 +981,19 @@ class MASt3REngine:
         logger.info(f"Outlier removal: {n_before:,} -> {inlier_mask.sum():,} points "
                     f"(removed {n_before - inlier_mask.sum():,})")
 
-        return points[inlier_mask], colors[inlier_mask], confidence[inlier_mask]
+        filtered_desc = descriptors[inlier_mask] if descriptors is not None else None
+        return (points[inlier_mask], colors[inlier_mask],
+                confidence[inlier_mask], filtered_desc)
 
     @staticmethod
     def _filter_largest_cluster(
         points: np.ndarray,
         colors: np.ndarray,
         confidence: np.ndarray,
+        descriptors: Optional[np.ndarray] = None,
         k_neighbors: int = 10,
         eps: float = 0.02,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]:
         """
         Keep only the largest connected cluster of points.
 
@@ -954,7 +1009,7 @@ class MASt3REngine:
 
         n = len(points)
         if n < 100:
-            return points, colors, confidence
+            return points, colors, confidence, descriptors
 
         tree = cKDTree(points)
         dists, indices = tree.query(points, k=k_neighbors + 1)
@@ -981,7 +1036,8 @@ class MASt3REngine:
             logger.info(f"Cluster filter: {n:,} -> {mask.sum():,} points "
                         f"(removed {n_removed:,} in {n_components - 1} small clusters)")
 
-        return points[mask], colors[mask], confidence[mask]
+        filtered_desc = descriptors[mask] if descriptors is not None else None
+        return points[mask], colors[mask], confidence[mask], filtered_desc
 
     def get_gpu_memory_info(self) -> Dict[str, float]:
         """
