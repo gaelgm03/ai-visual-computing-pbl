@@ -9,6 +9,7 @@ Includes mock mode for development without backend.
 import asyncio
 import json
 import base64
+import cv2
 import numpy as np
 from typing import Optional, Callable, Dict, Any, List
 from dataclasses import dataclass, field
@@ -269,15 +270,22 @@ class APIClient:
         )
         self._enrollment_session = session
         
-        if self.mode == ConnectionMode.LIVE and WEBSOCKETS_AVAILABLE:
-            try:
-                ws_endpoint = f"{self.ws_url}/ws/enroll/{user_name}"
-                self._ws_connection = ws_connect(ws_endpoint)
-                print(f"[APIClient] Connected to WebSocket: {ws_endpoint}")
-            except Exception as e:
-                print(f"[APIClient] WebSocket connection failed: {e}")
-                session.error = str(e)
+        if self.mode == ConnectionMode.LIVE:
+            if not WEBSOCKETS_AVAILABLE:
+                error_msg = "LIVE mode requires 'websockets' package. Install with: pip install websockets"
+                print(f"[APIClient] ERROR: {error_msg}")
+                session.error = error_msg
                 session.is_active = False
+            else:
+                try:
+                    ws_endpoint = f"{self.ws_url}/ws/enroll/{user_name}"
+                    self._ws_connection = ws_connect(ws_endpoint)
+                    print(f"[APIClient] Connected to WebSocket: {ws_endpoint}")
+                except Exception as e:
+                    error_msg = f"WebSocket connection failed: {e}. Is the backend running?"
+                    print(f"[APIClient] {error_msg}")
+                    session.error = error_msg
+                    session.is_active = False
         
         return session
     
@@ -294,9 +302,13 @@ class APIClient:
         if self._enrollment_session is None or not self._enrollment_session.is_active:
             return EnrollmentFrame(frame_id=-1, timestamp=time.time())
         
+        # Gradio webcam provides RGB frames, but backend expects BGR
+        # Convert RGB -> BGR before encoding
+        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        
         # Convert frame to base64
         from frontend.components.webcam_capture import WebcamCapture
-        frame_b64 = WebcamCapture.frame_to_base64(frame)
+        frame_b64 = WebcamCapture.frame_to_base64(frame_bgr)
         
         if self.mode == ConnectionMode.MOCK:
             result = self._mock.process_enrollment_frame(frame_b64)
@@ -322,6 +334,9 @@ class APIClient:
             EnrollmentFrame with detection results from backend
         """
         if self._ws_connection is None:
+            if self._enrollment_session and not self._enrollment_session.error:
+                self._enrollment_session.error = "WebSocket not connected"
+                self._enrollment_session.is_active = False
             return EnrollmentFrame(frame_id=-1, timestamp=time.time())
         
         try:
@@ -441,8 +456,53 @@ class APIClient:
         if self.mode == ConnectionMode.MOCK:
             return self._mock.authenticate(frames_b64, target_user)
         else:
-            # TODO: POST to /authenticate
-            return self._mock.authenticate(frames_b64, target_user)
+            # POST to /authenticate
+            if not HTTPX_AVAILABLE:
+                print("[APIClient] httpx not available for REST calls, falling back to mock")
+                return self._mock.authenticate(frames_b64, target_user)
+            
+            try:
+                import httpx
+                
+                # Build request payload
+                payload = {
+                    "frames": frames_b64,
+                    "user_id": target_user if target_user else None,
+                }
+                
+                response = httpx.post(
+                    f"{self.base_url}/authenticate",
+                    json=payload,
+                    timeout=self.timeout_sec,
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    # Map API response to AuthResponse dataclass
+                    anti_spoof = data.get("anti_spoof", {})
+                    return AuthResponse(
+                        success=True,
+                        is_match=data.get("is_match", False),
+                        matched_user_id=data.get("matched_user_id"),
+                        matched_user_name=data.get("matched_user_name"),
+                        final_score=data.get("final_score", 0.0),
+                        geometric_score=data.get("geometric_score", 0.0),
+                        descriptor_score=data.get("descriptor_score", 0.0),
+                        anti_spoof_passed=anti_spoof.get("passed", True),
+                        processing_time_ms=data.get("processing_time_sec", 0.0) * 1000,
+                    )
+                else:
+                    print(f"[APIClient] POST /authenticate failed: {response.status_code}")
+                    return AuthResponse(
+                        success=False,
+                        error=f"API error: {response.status_code}",
+                    )
+            except Exception as e:
+                print(f"[APIClient] POST /authenticate error: {e}")
+                return AuthResponse(
+                    success=False,
+                    error=str(e),
+                )
     
     # ==================== User Management ====================
     
@@ -531,8 +591,25 @@ class APIClient:
                 "colors": np.random.randint(150, 255, (n_points, 3), dtype=np.uint8),
             }
         else:
-            # TODO: GET /users/{user_id}/template
-            return None
+            if not HTTPX_AVAILABLE:
+                return None
+            try:
+                import httpx
+                response = httpx.get(
+                    f"{self.base_url}/users/{user_id}/template",
+                    timeout=self.timeout_sec
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    # Convert lists back to numpy arrays
+                    return {
+                        "points": np.array(data["points"], dtype=np.float32),
+                        "colors": np.array(data["colors"], dtype=np.uint8) if data.get("colors") else None,
+                    }
+                return None
+            except Exception as e:
+                print(f"[APIClient] GET /users/{user_id}/template error: {e}")
+                return None
 
 
 # Global client instance
@@ -540,8 +617,19 @@ _api_client: Optional[APIClient] = None
 
 
 def get_api_client() -> APIClient:
-    """Get or create the global API client instance."""
+    """Get or create the global API client instance with auto-detection."""
     global _api_client
     if _api_client is None:
-        _api_client = APIClient(mode=ConnectionMode.MOCK)
+        # Auto-detect backend availability
+        mode = ConnectionMode.MOCK
+        if HTTPX_AVAILABLE:
+            try:
+                import httpx
+                response = httpx.get("http://localhost:8000/health", timeout=1.0)
+                if response.status_code == 200:
+                    mode = ConnectionMode.LIVE
+                    print("[APIClient] Backend detected, using LIVE mode")
+            except Exception:
+                print("[APIClient] Backend not available, using MOCK mode")
+        _api_client = APIClient(mode=mode)
     return _api_client
