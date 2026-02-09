@@ -118,6 +118,7 @@ class AuthResponse(BaseModel):
     final_score: float = Field(..., description="Final fused match score (0-1)")
     geometric_score: float = Field(..., description="Geometric matching score (0-1)")
     descriptor_score: float = Field(..., description="Descriptor matching score (0-1)")
+    embedding_score: float = Field(0.0, description="ArcFace embedding match score (0-1)")
     anti_spoof: AntiSpoofResult = Field(..., description="Anti-spoofing results")
     processing_time_sec: float = Field(..., description="Total processing time in seconds")
     visualization_data: Optional[VisualizationData] = Field(
