@@ -41,6 +41,7 @@ from core.template_manager import (
 from core.config import (
     get_face_detection_config,
     get_keyframe_config,
+    get_config,
 )
 
 # Setup logging
@@ -235,10 +236,42 @@ async def run_enrollment(
         f"in {reconstruction_time:.1f}s"
     )
 
+    # Extract ArcFace identity embedding from keyframe crops
+    face_embedding = None
+    embedding_model = None
+    try:
+        from core.face_embedder import FaceEmbedder
+
+        embedding_config = get_config().get("face_embedding", {})
+        embedder = FaceEmbedder(embedding_config)
+        embedder.load_model()
+        # frames are BGR (from OpenCV crop) — FaceEmbedder expects BGR
+        face_embedding = embedder.extract_multi_frame(frames)
+        if face_embedding is not None:
+            embedding_model = embedding_config.get("model", "buffalo_l")
+            logger.info(
+                f"ArcFace embedding extracted: shape={face_embedding.shape}, "
+                f"norm={np.linalg.norm(face_embedding):.4f}"
+            )
+        else:
+            logger.warning("ArcFace embedding extraction returned None")
+    except ImportError:
+        logger.warning("insightface not installed — skipping ArcFace embedding")
+    except Exception as e:
+        logger.warning(f"ArcFace embedding extraction failed: {e}")
+
     # Generate user ID
     user_id = generate_user_id()
 
     # Create template
+    enrollment_metadata = {
+        **session.get_coverage_metadata(),
+        "reconstruction_time_sec": reconstruction_time,
+        "mast3r_version": "ViTLarge_metric",
+    }
+    if embedding_model:
+        enrollment_metadata["embedding_model"] = embedding_model
+
     template = FaceTemplate(
         user_id=user_id,
         user_name=session.user_name,
@@ -246,11 +279,8 @@ async def run_enrollment(
         descriptors=result.descriptors,
         confidence=result.confidence,
         colors=result.colors,
-        enrollment_metadata={
-            **session.get_coverage_metadata(),
-            "reconstruction_time_sec": reconstruction_time,
-            "mast3r_version": "ViTLarge_metric",
-        },
+        enrollment_metadata=enrollment_metadata,
+        face_embedding=face_embedding,
     )
 
     # Save template

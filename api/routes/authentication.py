@@ -33,7 +33,9 @@ from core.config import get_face_detection_config, get_config
 from core.matching import (
     ICPGeometricMatcher,
     NNDescriptorMatcher,
+    ArcFaceEmbeddingMatcher,
     WeightedFusion,
+    MultiModalFusion,
     StubGeometricMatcher,
     StubDescriptorMatcher,
     StubScoreFusion,
@@ -71,7 +73,8 @@ def get_matchers():
     Get matcher instances, using DS-1 implementations or fallback to stubs.
 
     Returns:
-        Tuple of (geometric_matcher, descriptor_matcher, fusion).
+        Tuple of (geo_matcher, desc_matcher, emb_matcher, fusion, legacy_fusion).
+        emb_matcher is None if ArcFaceEmbeddingMatcher is unavailable.
     """
     config = get_config()
     matching_config = config.get("matching", {})
@@ -89,13 +92,27 @@ def get_matchers():
         logger.warning("NNDescriptorMatcher not available, using stub")
         desc_matcher = StubDescriptorMatcher()
 
-    if WeightedFusion is not None:
+    # ArcFace embedding matcher (optional — graceful degradation)
+    emb_matcher = None
+    if ArcFaceEmbeddingMatcher is not None:
+        emb_matcher = ArcFaceEmbeddingMatcher(matching_config)
+
+    # Multi-modal fusion (3-way with ArcFace), with legacy 2-way fallback
+    if MultiModalFusion is not None:
+        fusion = MultiModalFusion(matching_config)
+    elif WeightedFusion is not None:
         fusion = WeightedFusion(matching_config)
     else:
-        logger.warning("WeightedFusion not available, using stub")
+        logger.warning("No fusion implementation available, using stub")
         fusion = StubScoreFusion()
 
-    return geo_matcher, desc_matcher, fusion
+    # Legacy 2-way fusion for templates without embeddings
+    if WeightedFusion is not None:
+        legacy_fusion = WeightedFusion(matching_config)
+    else:
+        legacy_fusion = StubScoreFusion()
+
+    return geo_matcher, desc_matcher, emb_matcher, fusion, legacy_fusion
 
 
 @router.post("/authenticate", response_model=AuthResponse)
@@ -137,12 +154,14 @@ async def authenticate(request: AuthRequest):
     face_detector = FaceDetector(face_config)
 
     cropped_faces = []
+    cropped_faces_bgr = []  # Keep BGR copies for ArcFace (insightface expects BGR)
     for i, frame in enumerate(frames):
         detection = face_detector.detect(frame)
         if detection is None:
             logger.warning(f"No face detected in frame {i}")
             continue
         cropped = face_detector.crop_face_region(frame, detection)
+        cropped_faces_bgr.append(cropped)
         # Convert BGR to RGB for MASt3R
         cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
         cropped_faces.append(cropped_rgb)
@@ -157,6 +176,7 @@ async def authenticate(request: AuthRequest):
             final_score=0.0,
             geometric_score=0.0,
             descriptor_score=0.0,
+            embedding_score=0.0,
             anti_spoof=AntiSpoofResultSchema(
                 passed=False,
                 depth_variance=0.0,
@@ -186,6 +206,24 @@ async def authenticate(request: AuthRequest):
 
     logger.info(f"Probe reconstruction: {len(probe_cloud)} points")
 
+    # 3b. Extract probe ArcFace embedding
+    probe_embedding = None
+    try:
+        from core.face_embedder import FaceEmbedder
+
+        embedding_config = get_config().get("face_embedding", {})
+        embedder = FaceEmbedder(embedding_config)
+        embedder.load_model()
+        probe_embedding = embedder.extract_multi_frame(cropped_faces_bgr)
+        if probe_embedding is not None:
+            logger.info(f"Probe ArcFace embedding: norm={np.linalg.norm(probe_embedding):.4f}")
+        else:
+            logger.warning("Probe ArcFace embedding extraction returned None")
+    except ImportError:
+        logger.info("insightface not installed — skipping ArcFace embedding")
+    except Exception as e:
+        logger.warning(f"Probe ArcFace embedding extraction failed: {e}")
+
     # 4. Run anti-spoofing check
     anti_spoof = get_anti_spoof()
     spoof_result = anti_spoof.check(probe_cloud, probe_confidence)
@@ -199,6 +237,7 @@ async def authenticate(request: AuthRequest):
             final_score=0.0,
             geometric_score=0.0,
             descriptor_score=0.0,
+            embedding_score=0.0,
             anti_spoof=AntiSpoofResultSchema(
                 passed=False,
                 depth_variance=spoof_result.depth_variance,
@@ -231,6 +270,7 @@ async def authenticate(request: AuthRequest):
                 final_score=0.0,
                 geometric_score=0.0,
                 descriptor_score=0.0,
+                embedding_score=0.0,
                 anti_spoof=AntiSpoofResultSchema(
                     passed=True,
                     depth_variance=spoof_result.depth_variance,
@@ -241,12 +281,13 @@ async def authenticate(request: AuthRequest):
             )
 
     # 6. Run matching against each template
-    geo_matcher, desc_matcher, fusion = get_matchers()
+    geo_matcher, desc_matcher, emb_matcher, fusion, legacy_fusion = get_matchers()
 
     best_match = None
     best_score = -1.0
     best_geo_score = 0.0
     best_desc_score = 0.0
+    best_emb_score = 0.0
 
     for template in templates:
         try:
@@ -261,19 +302,40 @@ async def authenticate(request: AuthRequest):
                 template.point_cloud,
             )
 
-            # Fuse scores
-            fused = fusion.fuse(geo_result, desc_result)
-
-            logger.debug(
-                f"Match vs {template.user_name}: "
-                f"geo={geo_result.score:.3f}, desc={desc_result.score:.3f}, "
-                f"fused={fused.score:.3f}"
+            # ArcFace embedding matching + fusion
+            use_embedding = (
+                emb_matcher is not None
+                and probe_embedding is not None
+                and template.face_embedding is not None
             )
+
+            if use_embedding:
+                emb_result = emb_matcher.compare(probe_embedding, template.face_embedding)
+                fused = fusion.fuse({
+                    "embedding": emb_result,
+                    "geometric": geo_result,
+                    "descriptor": desc_result,
+                })
+                emb_score = emb_result.score
+                logger.debug(
+                    f"Match vs {template.user_name}: "
+                    f"emb={emb_result.score:.3f}, geo={geo_result.score:.3f}, "
+                    f"desc={desc_result.score:.3f}, fused={fused.score:.3f}"
+                )
+            else:
+                fused = legacy_fusion.fuse(geo_result, desc_result)
+                emb_score = 0.0
+                logger.debug(
+                    f"Match vs {template.user_name} (no embedding): "
+                    f"geo={geo_result.score:.3f}, desc={desc_result.score:.3f}, "
+                    f"fused={fused.score:.3f}"
+                )
 
             if fused.score > best_score:
                 best_score = fused.score
                 best_geo_score = geo_result.score
                 best_desc_score = desc_result.score
+                best_emb_score = emb_score
                 best_match = template if fused.is_match else None
 
         except Exception as e:
@@ -290,6 +352,7 @@ async def authenticate(request: AuthRequest):
         final_score=max(0.0, best_score),
         geometric_score=best_geo_score,
         descriptor_score=best_desc_score,
+        embedding_score=best_emb_score,
         anti_spoof=AntiSpoofResultSchema(
             passed=True,
             depth_variance=spoof_result.depth_variance,

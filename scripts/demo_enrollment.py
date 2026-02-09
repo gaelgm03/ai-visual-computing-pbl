@@ -234,14 +234,14 @@ def capture_keyframes(detector: FaceDetector, selector: KeyframeSelector,
 
 
 def run_reconstruction(keyframes: List[KeyframeCandidate]):
-    """Run MASt3R 3D reconstruction on captured keyframes."""
+    """Run MASt3R 3D reconstruction and ArcFace embedding on captured keyframes."""
     print("\n" + "=" * 60)
     print("PHASE 2: 3D Reconstruction with MASt3R")
     print("=" * 60)
 
     if len(keyframes) < 2:
         print("ERROR: Need at least 2 keyframes for reconstruction.")
-        return None, None
+        return None, None, None
 
     # Import MASt3R engine (lazy import for faster startup)
     print("Loading MASt3R engine...")
@@ -265,7 +265,29 @@ def run_reconstruction(keyframes: List[KeyframeCandidate]):
     print(f"  Points: {result.point_cloud.shape[0]:,}")
     print(f"  Descriptor dim: {result.descriptors.shape[1] if result.descriptors is not None else 'N/A'}")
 
-    return result.point_cloud, result.colors
+    # Extract ArcFace identity embedding
+    face_embedding = None
+    try:
+        from core.face_embedder import FaceEmbedder
+        from core.config import get_config
+
+        embedding_config = get_config().get("face_embedding", {})
+        print("Loading ArcFace model...")
+        embedder = FaceEmbedder(embedding_config)
+        embedder.load_model()
+        # frames are BGR (from OpenCV crop) — FaceEmbedder expects BGR
+        face_embedding = embedder.extract_multi_frame(frames)
+        if face_embedding is not None:
+            print(f"  ArcFace embedding: shape={face_embedding.shape}, "
+                  f"norm={np.linalg.norm(face_embedding):.4f}")
+        else:
+            print("  WARNING: ArcFace embedding extraction returned None")
+    except ImportError:
+        print("  INFO: insightface not installed — skipping ArcFace embedding")
+    except Exception as e:
+        print(f"  WARNING: ArcFace embedding extraction failed: {e}")
+
+    return result.point_cloud, result.colors, face_embedding
 
 
 def visualize_point_cloud(points: np.ndarray, colors: Optional[np.ndarray],
@@ -523,8 +545,8 @@ def main():
         if args.save_keyframes:
             save_keyframes(keyframes, keyframe_dir)
 
-    # Phase 2: 3D Reconstruction
-    points, colors = run_reconstruction(keyframes)
+    # Phase 2: 3D Reconstruction + ArcFace Embedding
+    points, colors, face_embedding = run_reconstruction(keyframes)
     if points is None:
         return 1
 
@@ -541,6 +563,7 @@ def main():
     print("=" * 60)
     print(f"Total keyframes: {len(keyframes)}")
     print(f"Total 3D points: {len(points):,}")
+    print(f"ArcFace embedding: {'extracted' if face_embedding is not None else 'not available'}")
     print(f"Visualization: {html_path}")
     print()
     print("The 3D point cloud should be displayed in your browser.")
