@@ -356,11 +356,8 @@ async def websocket_enroll(websocket: WebSocket, user_name: str):
         # Create enrollment session
         session = EnrollmentSession(user_name)
 
-        # Get MASt3R engine (singleton)
-        engine = get_engine()
-        if not engine._model_loaded:
-            logger.info("Loading MASt3R model...")
-            engine.load_model()
+        # NOTE: MASt3R model loading is deferred until keyframes are captured
+        # This allows face detection/keyframe capture to work without MASt3R installed
 
         # Process frames until enrollment is complete
         while True:
@@ -399,6 +396,12 @@ async def websocket_enroll(websocket: WebSocket, user_name: str):
                     f"Enrollment ready for {user_name}: "
                     f"{len(session.keyframe_candidates)} keyframes captured"
                 )
+
+                # Load MASt3R model now (deferred until needed)
+                engine = get_engine()
+                if not engine._model_loaded:
+                    logger.info("Loading MASt3R model for reconstruction...")
+                    engine.load_model()
 
                 # Run reconstruction and save template
                 try:

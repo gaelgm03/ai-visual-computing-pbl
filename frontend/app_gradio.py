@@ -56,6 +56,8 @@ _enrollment_active = False
 _enrollment_user = ""
 _enrollment_poses: List[HeadPose] = []
 _last_frame_result = None
+_frame_counter = 0
+_FRAME_SKIP = 3  # Only send every Nth frame to backend for smoother UI
 
 
 # ============================================================
@@ -64,7 +66,7 @@ _last_frame_result = None
 
 def start_enrollment(user_name: str):
     """Initialize enrollment session."""
-    global _enrollment_active, _enrollment_user, _enrollment_poses, _last_frame_result
+    global _enrollment_active, _enrollment_user, _enrollment_poses, _last_frame_result, _frame_counter
     
     if not user_name or not user_name.strip():
         return None, "⚠️ Please enter a user name", create_coverage_plot(), create_live_cloud_plot()
@@ -75,9 +77,24 @@ def start_enrollment(user_name: str):
     _enrollment_active = True
     _enrollment_user = user_name.strip()
     _last_frame_result = None
+    _frame_counter = 0
     
     # Start API session
-    api_client.start_enrollment(_enrollment_user)
+    session = api_client.start_enrollment(_enrollment_user)
+    
+    # Check for connection errors
+    if session.error:
+        _enrollment_active = False
+        error_status = f"""## ❌ Enrollment Failed
+
+**Error:** {session.error}
+
+**Troubleshooting:**
+1. Make sure the backend is running: `uvicorn api.app:app --reload`
+2. Install websockets: `pip install websockets`
+3. Refresh the page after starting backend
+"""
+        return None, error_status, create_coverage_plot(), create_live_cloud_plot()
     
     status = f"""## 📷 Enrollment Started for **{_enrollment_user}**
     
@@ -94,41 +111,64 @@ def start_enrollment(user_name: str):
 def process_enrollment_frame(frame: Optional[np.ndarray], user_name: str):
     """
     Process a frame during enrollment via API client.
+    Uses frame skipping for smoother UI - only sends every Nth frame to backend.
     """
-    global _last_frame_result
+    global _last_frame_result, _enrollment_active, _frame_counter
     
     if frame is None or not _enrollment_active:
         return None, enrollment_guide.format_status_message(), create_coverage_plot()
     
-    # Send frame to API (mock or live)
-    result = api_client.process_enrollment_frame(frame)
-    _last_frame_result = result
+    # Check for session errors (e.g., WebSocket disconnected)
+    session = api_client._enrollment_session
+    if session and session.error:
+        _enrollment_active = False
+        return None, f"## ❌ Connection Error\n\n{session.error}", create_coverage_plot()
     
-    # Extract pose from result
-    pose = HeadPose(
-        yaw=result.head_pose.get("yaw", 0) if result.head_pose else 0,
-        pitch=result.head_pose.get("pitch", 0) if result.head_pose else 0,
-        roll=result.head_pose.get("roll", 0) if result.head_pose else 0,
-    )
+    # Frame skipping: only send every Nth frame to backend for smoother UI
+    _frame_counter += 1
+    should_process = (_frame_counter % _FRAME_SKIP == 0)
     
-    # Track poses for keyframes
-    if result.is_keyframe:
-        _enrollment_poses.append(pose)
+    if should_process:
+        # Send frame to API (mock or live)
+        result = api_client.process_enrollment_frame(frame)
+        _last_frame_result = result
+        
+        # Extract pose from result
+        pose = HeadPose(
+            yaw=result.head_pose.get("yaw", 0) if result.head_pose else 0,
+            pitch=result.head_pose.get("pitch", 0) if result.head_pose else 0,
+            roll=result.head_pose.get("roll", 0) if result.head_pose else 0,
+        )
+        
+        # Track poses for keyframes
+        if result.is_keyframe:
+            _enrollment_poses.append(pose)
+        
+        # Update coverage
+        enrollment_guide.update_coverage(_enrollment_poses)
+    else:
+        # Use last result for non-processed frames
+        result = _last_frame_result
+        if result is None:
+            # No previous result yet, show waiting state
+            return frame, "## ⏳ Starting...", create_coverage_plot()
+        pose = HeadPose(
+            yaw=result.head_pose.get("yaw", 0) if result.head_pose else 0,
+            pitch=result.head_pose.get("pitch", 0) if result.head_pose else 0,
+            roll=result.head_pose.get("roll", 0) if result.head_pose else 0,
+        )
     
-    # Update coverage
-    enrollment_guide.update_coverage(_enrollment_poses)
-    
-    # Draw overlay on frame
+    # Draw overlay on frame (always, for smooth video)
     annotated_frame = draw_enrollment_overlay(
         frame, 
         pose, 
-        result.face_detected,
-        result.face_bbox,
-        result.is_keyframe,
-        result.quality_score,
+        result.face_detected if result else False,
+        result.face_bbox if result else None,
+        result.is_keyframe if result and should_process else False,
+        result.quality_score if result else 0.0,
     )
     
-    status_msg = format_enrollment_status(result)
+    status_msg = format_enrollment_status(result) if result else "## ⏳ Processing..."
     coverage_plot = create_coverage_plot()
     
     return annotated_frame, status_msg, coverage_plot

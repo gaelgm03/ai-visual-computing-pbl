@@ -111,7 +111,7 @@ class WebcamCapture:
             Base64-encoded string of the image.
         """
         if format == "jpeg":
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 50]
             success, buffer = cv2.imencode('.jpg', frame, encode_param)
         else:
             success, buffer = cv2.imencode('.png', frame)
