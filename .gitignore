@@ -101,6 +101,7 @@ temp/
 # ============================================================
 docs/GPU_SETUP_HANDOFF.md
 docs/HANDOFF_*.md
+docs/*_ja.md
 
 # ============================================================
 # Frontend assets that should be generated
