@@ -441,8 +441,53 @@ class APIClient:
         if self.mode == ConnectionMode.MOCK:
             return self._mock.authenticate(frames_b64, target_user)
         else:
-            # TODO: POST to /authenticate
-            return self._mock.authenticate(frames_b64, target_user)
+            # POST to /authenticate
+            if not HTTPX_AVAILABLE:
+                print("[APIClient] httpx not available for REST calls, falling back to mock")
+                return self._mock.authenticate(frames_b64, target_user)
+            
+            try:
+                import httpx
+                
+                # Build request payload
+                payload = {
+                    "frames": frames_b64,
+                    "user_id": target_user if target_user else None,
+                }
+                
+                response = httpx.post(
+                    f"{self.base_url}/authenticate",
+                    json=payload,
+                    timeout=self.timeout_sec,
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    # Map API response to AuthResponse dataclass
+                    anti_spoof = data.get("anti_spoof", {})
+                    return AuthResponse(
+                        success=True,
+                        is_match=data.get("is_match", False),
+                        matched_user_id=data.get("matched_user_id"),
+                        matched_user_name=data.get("matched_user_name"),
+                        final_score=data.get("final_score", 0.0),
+                        geometric_score=data.get("geometric_score", 0.0),
+                        descriptor_score=data.get("descriptor_score", 0.0),
+                        anti_spoof_passed=anti_spoof.get("passed", True),
+                        processing_time_ms=data.get("processing_time_sec", 0.0) * 1000,
+                    )
+                else:
+                    print(f"[APIClient] POST /authenticate failed: {response.status_code}")
+                    return AuthResponse(
+                        success=False,
+                        error=f"API error: {response.status_code}",
+                    )
+            except Exception as e:
+                print(f"[APIClient] POST /authenticate error: {e}")
+                return AuthResponse(
+                    success=False,
+                    error=str(e),
+                )
     
     # ==================== User Management ====================
     

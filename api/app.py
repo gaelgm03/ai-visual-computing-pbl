@@ -29,6 +29,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.enrollment import router as enrollment_router
+from api.routes.authentication import router as authentication_router
 from api.schemas import (
     UserInfo,
     UserListResponse,
@@ -108,7 +109,7 @@ API for face authentication using MASt3R 3D reconstruction.
 
 ## Features
 - **Enrollment**: Register a new user with real-time WebSocket feedback
-- **Authentication**: Verify a user's identity (coming soon)
+- **Authentication**: Verify a user's identity via POST /authenticate
 - **User Management**: List, view, and delete enrolled users
 
 ## WebSocket Enrollment
@@ -130,6 +131,7 @@ app.add_middleware(
 
 # Include routers
 app.include_router(enrollment_router)
+app.include_router(authentication_router)
 
 
 # ============================================================
