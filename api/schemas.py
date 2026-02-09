@@ -167,6 +167,8 @@ class DeleteUserResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     """System health check response."""
+    model_config = {"protected_namespaces": ()}  # Allow 'model_' prefix in field names
+    
     status: str = Field(..., description="Overall status: 'healthy' or 'unhealthy'")
     model_loaded: bool = Field(..., description="Whether MASt3R model is loaded")
     gpu_available: bool = Field(..., description="Whether GPU is available")
