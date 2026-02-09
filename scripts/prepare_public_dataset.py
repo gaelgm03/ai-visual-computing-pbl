@@ -298,12 +298,14 @@ def run_mast3r_reconstruction(
     images: List[ImageInfo],
     detector: FaceDetector,
     label: str = "enrollment",
+    face_embedder=None,
 ) -> Optional[dict]:
     """
     Run MASt3R reconstruction on selected images.
 
     Returns dict with point_cloud, descriptors, confidence, colors,
-    or None on failure.
+    and optionally face_embedding (if face_embedder is provided).
+    Returns None on failure.
     """
     if len(images) < 2:
         logger.error(f"  Need at least 2 frames for {label} reconstruction, got {len(images)}")
@@ -333,6 +335,16 @@ def run_mast3r_reconstruction(
         logger.error(f"  Only {len(frames)} valid frames after cropping for {label}")
         return None
 
+    # Extract ArcFace embedding from face crops (before MASt3R processing)
+    face_embedding = None
+    if face_embedder is not None:
+        logger.info(f"  Extracting ArcFace embedding from {len(frames)} face crops...")
+        face_embedding = face_embedder.extract_multi_frame(frames)
+        if face_embedding is not None:
+            logger.info(f"  ArcFace embedding: dim={face_embedding.shape[0]}, norm={np.linalg.norm(face_embedding):.4f}")
+        else:
+            logger.warning(f"  ArcFace failed to detect any face in {label} frames")
+
     logger.info(f"  Running MASt3R {label} reconstruction with {len(frames)} frames...")
     start = time.time()
 
@@ -342,12 +354,16 @@ def run_mast3r_reconstruction(
     n_points = result.point_cloud.shape[0]
     logger.info(f"  {label.capitalize()} reconstruction: {n_points:,} points in {elapsed:.1f}s")
 
-    return {
+    output = {
         "point_cloud": result.point_cloud,
         "descriptors": result.descriptors,
         "confidence": result.confidence,
         "colors": result.colors,
     }
+    if face_embedding is not None:
+        output["face_embedding"] = face_embedding
+
+    return output
 
 
 # ============================================================
@@ -384,16 +400,25 @@ def save_npz(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    np.savez_compressed(
-        str(output_path),
+    save_kwargs = dict(
         point_cloud=data["point_cloud"],
         descriptors=data["descriptors"],
         confidence=data["confidence"],
         colors=data["colors"],
-        metadata=json.dumps(metadata),
     )
+    if "face_embedding" in data and data["face_embedding"] is not None:
+        save_kwargs["face_embedding"] = data["face_embedding"]
+        metadata["template_version"] = "2.0"
+        metadata["embedding_model"] = "buffalo_l"
+        metadata["embedding_dim"] = int(data["face_embedding"].shape[0])
 
-    logger.info(f"  Saved {output_path.name} ({data['point_cloud'].shape[0]:,} points)")
+    save_kwargs["metadata"] = json.dumps(metadata)
+    np.savez_compressed(str(output_path), **save_kwargs)
+
+    emb_info = ""
+    if "face_embedding" in save_kwargs:
+        emb_info = f", embedding={save_kwargs['face_embedding'].shape}"
+    logger.info(f"  Saved {output_path.name} ({data['point_cloud'].shape[0]:,} points{emb_info})")
 
 
 # ============================================================
@@ -414,6 +439,7 @@ def process_person(
     max_roll: float = 15.0,
     rng: Optional[random.Random] = None,
     skip_existing: bool = True,
+    face_embedder=None,
 ) -> PersonResult:
     """Process a single person's images into enrollment + auth .npz files."""
     person_name = person_dir.name
@@ -470,7 +496,8 @@ def process_person(
     # Step 4+5: MASt3R reconstruction + save enrollment
     if not (skip_existing and enrollment_path.exists()):
         enrollment_data = run_mast3r_reconstruction(
-            enrollment_images, detector, label="enrollment"
+            enrollment_images, detector, label="enrollment",
+            face_embedder=face_embedder,
         )
         if enrollment_data:
             save_npz(
@@ -491,7 +518,8 @@ def process_person(
     if result.auth_images:
         if not (skip_existing and auth_path.exists()):
             auth_data = run_mast3r_reconstruction(
-                result.auth_images, detector, label="auth"
+                result.auth_images, detector, label="auth",
+                face_embedder=face_embedder,
             )
             if auth_data:
                 save_npz(
@@ -613,6 +641,16 @@ The dataset directory should have this structure:
     face_config = get_face_detection_config()
     detector = FaceDetector(face_config)
 
+    # Initialize ArcFace embedder (optional, graceful fallback)
+    face_embedder = None
+    try:
+        from core.face_embedder import FaceEmbedder
+        face_embedder = FaceEmbedder({"device": "cuda", "backend": "auto"})
+        face_embedder.load_model()
+        logger.info("ArcFace embedder loaded — .npz files will include face_embedding")
+    except Exception as e:
+        logger.warning(f"ArcFace not available ({e}), .npz files will NOT include face_embedding")
+
     # Find person directories
     person_dirs = sorted(
         d for d in dataset_dir.iterdir()
@@ -652,6 +690,7 @@ The dataset directory should have this structure:
             max_roll=15.0,
             rng=rng,
             skip_existing=not args.no_skip_existing,
+            face_embedder=face_embedder,
         )
         results.append(result)
 

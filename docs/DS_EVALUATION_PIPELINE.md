@@ -1,5 +1,9 @@
 # DS Evaluation Pipeline Guide
 
+> **Updated 2026-02-10**: Added ArcFace embedding matching as the primary identity signal.
+> The pipeline now supports 3-way matching (embedding + geometric + descriptor) via `MultiModalFusion`.
+> Existing v1 .npz files (without `face_embedding`) can be augmented using `scripts/augment_npz_with_embeddings.py` on WSL.
+
 This document provides step-by-step instructions for running the face authentication matching pipeline evaluation on Google Colab.
 
 **How to run**: Create a new empty notebook on Colab and copy-paste each cell's code below in order (same approach as `technical-architecture_whole.md` Appendix C).
@@ -32,16 +36,17 @@ Load .npz files
 3D point cloud visualization (plotly)
     |
 Matching algorithms
-  |-- Geometric Matcher : ICP alignment + Chamfer distance (3D shape comparison)
-  +-- Descriptor Matcher: Reciprocal nearest-neighbor matching (feature vector comparison)
+  |-- Embedding Matcher : ArcFace cosine similarity (PRIMARY identity signal, added 2026-02-10)
+  |-- Geometric Matcher : ICP alignment + Chamfer distance (supplementary 3D shape comparison)
+  +-- Descriptor Matcher: Reciprocal nearest-neighbor matching (disabled by default, weight=0.0)
     |
-Score Fusion (weighted linear combination)
+Multi-Modal Score Fusion (weighted linear combination, 3-way)
     |
 Evaluation metrics (FAR, TAR, EER, AUC, F1, etc.)
     |
 Diagnostic plots (4 charts)
     |
-Optimal parameter search (grid search)
+Optimal parameter search (grid search over 3 weights)
 ```
 
 ### No MASt3R Model Loading Required
@@ -103,11 +108,14 @@ Each `.npz` file contains the following arrays:
 | `descriptors` | `(N, 24)` | `float32` | MASt3R feature vectors. **Not L2-normalized** |
 | `confidence` | `(N,)` | `float32` | MASt3R confidence. `>1` indicates reliable points (not in [0,1] range) |
 | `colors` | `(N, 3)` | `uint8` | RGB color (0-255) |
+| `face_embedding` | `(512,)` | `float32` | ArcFace identity embedding, L2-normalized. **v2.0 only** (added 2026-02-10) |
 | `metadata` | scalar | `str` | JSON string (user_id, capture time, frame count, etc.) |
 
 ### Important Notes
 
+- **Template versions**: v1.0 files do not have `face_embedding`. Use `scripts/augment_npz_with_embeddings.py` (on WSL) to add ArcFace embeddings to existing .npz files. v2.0 files include `face_embedding` from the start. (Added 2026-02-10)
 - **Descriptors are not normalized**: MASt3R output descriptors do not have unit L2 norm. The Descriptor Matcher normalizes them internally.
+- **Descriptors lack identity discrimination**: MASt3R descriptors are designed for view correspondence, not person identification. The descriptor weight is 0.0 by default. (Added 2026-02-10)
 - **Confidence range**: `confidence` values are positive reals in `[0, +inf)`. Values `>=1.0` are considered reliable (see `config.yaml` `confidence_threshold: 1.5`).
 - **Color format**: RGB order (not OpenCV's BGR). Can be used directly for visualization.
 
@@ -134,7 +142,7 @@ Each `.npz` file contains the following arrays:
 # ============================================================
 
 !nvidia-smi
-!pip install -q open3d plotly scikit-learn tqdm
+!pip install -q open3d plotly scikit-learn tqdm insightface onnxruntime-gpu
 
 import torch
 if torch.cuda.is_available():
@@ -270,6 +278,16 @@ if abs(norms.mean() - 1.0) > 0.1:
     print("Descriptors are NOT unit-normalized — the matcher will normalize internally.")
 else:
     print("Descriptors appear unit-normalized.")
+
+# Check for ArcFace embeddings (v2.0 templates, added 2026-02-10)
+HAS_EMBEDDINGS = "face_embedding" in sample
+if HAS_EMBEDDINGS:
+    emb = sample["face_embedding"]
+    print(f"\nArcFace embedding: shape={emb.shape}, norm={np.linalg.norm(emb):.4f}")
+    print("Template version: v2.0 (with identity embeddings)")
+else:
+    print("\nNo face_embedding found — template version v1.0")
+    print("Run scripts/augment_npz_with_embeddings.py (on WSL) to add ArcFace embeddings.")
 ```
 
 ---
@@ -334,9 +352,11 @@ Use mouse drag to rotate, scroll to zoom. Verify that the face shape is recogniz
 
 ### Cell 6: Initialize Matchers
 
+> Updated 2026-02-10: Added `ArcFaceEmbeddingMatcher` and `MultiModalFusion` for 3-way matching.
+
 ```python
 # ============================================================
-# Cell 6: Initialize Matchers
+# Cell 6: Initialize Matchers (updated 2026-02-10: ArcFace + MultiModalFusion)
 # ============================================================
 
 from core.matching.geometric_matcher import ICPGeometricMatcher
@@ -363,30 +383,57 @@ geo_matcher = ICPGeometricMatcher(config)
 desc_matcher = NNDescriptorMatcher(config)
 fusion = WeightedFusion(config)
 
-print("Matchers initialized:")
-print(f"  Geometric: ICP + Chamfer (subsample={config['geometric_subsample']})")
-print(f"  Descriptor: Reciprocal NN (subsample={config['descriptor_subsample']})")
-print(f"  Fusion: geo={config['geometric_weight']}, desc={config['descriptor_weight']}, threshold={config['accept_threshold']}")
+# --- ArcFace embedding matcher (added 2026-02-10) ---
+emb_matcher = None
+multi_fusion = None
+if HAS_EMBEDDINGS:
+    from core.matching.embedding_matcher import ArcFaceEmbeddingMatcher
+    from core.matching.score_fusion import MultiModalFusion
+
+    emb_matcher = ArcFaceEmbeddingMatcher({"embedding_dim": 512})
+
+    multi_config = {
+        "embedding_weight": 0.7,
+        "geometric_weight": 0.3,
+        "descriptor_weight": 0.0,
+        "accept_threshold": 0.55,
+    }
+    multi_fusion = MultiModalFusion(multi_config)
+
+    print("Matchers initialized (3-way with ArcFace):")
+    print(f"  Embedding: ArcFace cosine similarity (weight={multi_config['embedding_weight']})")
+    print(f"  Geometric: ICP + Chamfer (weight={multi_config['geometric_weight']})")
+    print(f"  Descriptor: Reciprocal NN (weight={multi_config['descriptor_weight']} — disabled)")
+    print(f"  Fusion: MultiModalFusion, threshold={multi_config['accept_threshold']}")
+else:
+    print("Matchers initialized (legacy 2-way, no ArcFace embeddings):")
+    print(f"  Geometric: ICP + Chamfer (subsample={config['geometric_subsample']})")
+    print(f"  Descriptor: Reciprocal NN (subsample={config['descriptor_subsample']})")
+    print(f"  Fusion: geo={config['geometric_weight']}, desc={config['descriptor_weight']}, threshold={config['accept_threshold']}")
 ```
 
 Matcher roles:
 
 | Matcher | Method | Input | Output |
 |---------|--------|-------|--------|
+| `ArcFaceEmbeddingMatcher` | Cosine similarity of L2-normalized 512-dim embeddings | Two embeddings `(512,)` | Score [0, 1] (added 2026-02-10) |
 | `ICPGeometricMatcher` | ICP alignment > Chamfer distance > `exp(-alpha*d)` | Two point clouds `(N,3)` | Score [0, 1] |
-| `NNDescriptorMatcher` | L2-normalize > Reciprocal NN > match_ratio + cosine_sim | Two descriptor sets `(N,24)` | Score [0, 1] |
-| `WeightedFusion` | `0.4*geo + 0.6*desc` > threshold | Two scores above | Final score + accept/reject |
+| `NNDescriptorMatcher` | L2-normalize > Reciprocal NN > match_ratio + cosine_sim | Two descriptor sets `(N,24)` | Score [0, 1] (disabled by default) |
+| `MultiModalFusion` | `0.7*emb + 0.3*geo + 0.0*desc` > threshold | Dict of scores | Final score + accept/reject (added 2026-02-10) |
 
 ---
 
 ### Cell 7: Genuine Pair Test (Same Person)
 
+> Updated 2026-02-10: Added ArcFace embedding comparison when available.
+
 ```python
 # ============================================================
-# Cell 7: Single Genuine Pair Test
+# Cell 7: Single Genuine Pair Test (updated 2026-02-10)
 # ============================================================
 
 import time
+from core.matching.interfaces import MatchResult
 
 person = subjects[0]
 enrollment = np.load(enrollments[person], allow_pickle=True)
@@ -402,18 +449,30 @@ desc_result = desc_matcher.compare(
     probe["point_cloud"], enrollment["point_cloud"],
 )
 t2 = time.time()
-final_result = fusion.fuse(geo_result, desc_result)
-t3 = time.time()
+
+# ArcFace embedding comparison (added 2026-02-10)
+if HAS_EMBEDDINGS and emb_matcher is not None:
+    emb_result = emb_matcher.compare(probe["face_embedding"], enrollment["face_embedding"])
+    t3 = time.time()
+    final_result = multi_fusion.fuse({
+        "embedding": emb_result,
+        "geometric": geo_result,
+        "descriptor": desc_result,
+    })
+    print(f"  Embedding:  {emb_result.score:.3f}  (raw cosine: {emb_result.details.get('raw_cosine_similarity', 'N/A'):.3f})")
+else:
+    t3 = time.time()
+    final_result = fusion.fuse(geo_result, desc_result)
 
 print(f"  Geometric:  {geo_result.score:.3f}  (Chamfer: {geo_result.details.get('chamfer_distance', 'N/A')})")
 print(f"  Descriptor: {desc_result.score:.3f}  (Match ratio: {desc_result.details.get('match_ratio', 0):.3f}, "
       f"Avg sim: {desc_result.details.get('avg_cosine_similarity', 0):.3f})")
 print(f"  Fused:      {final_result.score:.3f}  is_match={final_result.is_match}")
-print(f"  Time: geo={t1-t0:.2f}s, desc={t2-t1:.2f}s, fusion={t3-t2:.4f}s")
+print(f"  Time: geo={t1-t0:.2f}s, desc={t2-t1:.2f}s, total={t3-t0:.2f}s")
 print(f"  Backend: desc={desc_result.details.get('backend', 'unknown')}")
 ```
 
-**Expected result**: Fused >= 0.65, `is_match=True`
+**Expected result**: With ArcFace: Fused >= 0.55, `is_match=True`. Without: Fused >= 0.65.
 
 ---
 
@@ -421,7 +480,7 @@ print(f"  Backend: desc={desc_result.details.get('backend', 'unknown')}")
 
 ```python
 # ============================================================
-# Cell 8: Single Impostor Pair Test
+# Cell 8: Single Impostor Pair Test (updated 2026-02-10)
 # ============================================================
 
 if len(subjects) >= 2:
@@ -435,9 +494,18 @@ if len(subjects) >= 2:
         probe_b["descriptors"], enrollment_a["descriptors"],
         probe_b["point_cloud"], enrollment_a["point_cloud"],
     )
-    final_result = fusion.fuse(geo_result, desc_result)
 
-    print(f"=== Impostor pair: {person_b} vs {person_a} ===")
+    if HAS_EMBEDDINGS and emb_matcher is not None:
+        emb_result = emb_matcher.compare(probe_b["face_embedding"], enrollment_a["face_embedding"])
+        final_result = multi_fusion.fuse({
+            "embedding": emb_result, "geometric": geo_result, "descriptor": desc_result,
+        })
+        print(f"=== Impostor pair: {person_b} vs {person_a} ===")
+        print(f"  Embedding:  {emb_result.score:.3f}  (raw cosine: {emb_result.details.get('raw_cosine_similarity', 'N/A'):.3f})")
+    else:
+        final_result = fusion.fuse(geo_result, desc_result)
+        print(f"=== Impostor pair: {person_b} vs {person_a} ===")
+
     print(f"  Geometric:  {geo_result.score:.3f}")
     print(f"  Descriptor: {desc_result.score:.3f}")
     print(f"  Fused:      {final_result.score:.3f}  is_match={final_result.is_match}")
@@ -445,15 +513,17 @@ else:
     print("Need at least 2 subjects for impostor test")
 ```
 
-**Expected result**: Fused < 0.65, `is_match=False`
+**Expected result**: With ArcFace: Fused < 0.55, `is_match=False`. Without: Fused < 0.65.
 
 ---
 
 ### Cell 9: All-vs-All Matching
 
+> Updated 2026-02-10: Added ArcFace embedding comparison in the matching loop.
+
 ```python
 # ============================================================
-# Cell 9: All-vs-All Matching
+# Cell 9: All-vs-All Matching (updated 2026-02-10: ArcFace)
 # ============================================================
 
 from tqdm import tqdm
@@ -471,6 +541,10 @@ for s in subjects:
 
 total_pairs = len(subjects) ** 2
 print(f"Running {total_pairs} pairs ({len(subjects)} subjects x {len(subjects)} enrollments)...")
+if HAS_EMBEDDINGS:
+    print("  Mode: 3-way (ArcFace + Geometric + Descriptor)")
+else:
+    print("  Mode: Legacy 2-way (Geometric + Descriptor)")
 
 for probe_person in tqdm(subjects, desc="Matching"):
     p_data = probe_cache[probe_person]
@@ -486,18 +560,34 @@ for probe_person in tqdm(subjects, desc="Matching"):
             p_data["descriptors"], e_data["descriptors"],
             p_data["point_cloud"], e_data["point_cloud"],
         )
-        final_result = fusion.fuse(geo_result, desc_result)
 
-        similarities.append(final_result.score)
-        labels.append(is_genuine)
-        pair_info.append({
+        info = {
             "probe": probe_person,
             "enrollment": enroll_person,
             "genuine": is_genuine,
             "geo_score": geo_result.score,
             "desc_score": desc_result.score,
-            "fused_score": final_result.score,
-        })
+        }
+
+        # ArcFace embedding matching (added 2026-02-10)
+        if HAS_EMBEDDINGS and emb_matcher is not None:
+            emb_result = emb_matcher.compare(
+                p_data["face_embedding"], e_data["face_embedding"]
+            )
+            final_result = multi_fusion.fuse({
+                "embedding": emb_result,
+                "geometric": geo_result,
+                "descriptor": desc_result,
+            })
+            info["emb_score"] = emb_result.score
+            info["emb_raw_cosine"] = emb_result.details.get("raw_cosine_similarity", 0)
+        else:
+            final_result = fusion.fuse(geo_result, desc_result)
+
+        info["fused_score"] = final_result.score
+        similarities.append(final_result.score)
+        labels.append(is_genuine)
+        pair_info.append(info)
 
 similarities = np.array(similarities)
 labels = np.array(labels)
@@ -559,9 +649,11 @@ Four diagnostic plots are generated automatically (see [Interpreting Results](#6
 
 ### Cell 11: Per-Path Score Distributions
 
+> Updated 2026-02-10: Added 4th subplot for ArcFace embedding scores.
+
 ```python
 # ============================================================
-# Cell 11: Per-Path Score Distributions
+# Cell 11: Per-Path Score Distributions (updated 2026-02-10)
 # ============================================================
 
 import matplotlib.pyplot as plt
@@ -570,16 +662,23 @@ geo_scores = np.array([p['geo_score'] for p in pair_info])
 desc_scores = np.array([p['desc_score'] for p in pair_info])
 fused_scores = np.array([p['fused_score'] for p in pair_info])
 
-fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+if HAS_EMBEDDINGS:
+    emb_scores = np.array([p.get('emb_score', 0) for p in pair_info])
+    fig, axes = plt.subplots(1, 4, figsize=(24, 5))
+    score_sets = [geo_scores, desc_scores, emb_scores, fused_scores]
+    titles = ['Geometric (ICP + Chamfer)', 'Descriptor (Reciprocal NN)',
+              'Embedding (ArcFace)', 'Fused (MultiModal)']
+    threshold = multi_config['accept_threshold']
+else:
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    score_sets = [geo_scores, desc_scores, fused_scores]
+    titles = ['Geometric (ICP + Chamfer)', 'Descriptor (Reciprocal NN)', 'Fused (Weighted)']
+    threshold = config['accept_threshold']
 
-for ax, scores, title in zip(
-    axes,
-    [geo_scores, desc_scores, fused_scores],
-    ['Geometric (ICP + Chamfer)', 'Descriptor (Reciprocal NN)', 'Fused (Weighted)'],
-):
+for ax, scores, title in zip(axes, score_sets, titles):
     ax.hist(scores[labels == 1], bins=20, alpha=0.7, label='Genuine', color='green')
     ax.hist(scores[labels == 0], bins=20, alpha=0.7, label='Impostor', color='red')
-    ax.axvline(x=config['accept_threshold'], color='black', linestyle='--', label='Threshold')
+    ax.axvline(x=threshold, color='black', linestyle='--', label='Threshold')
     ax.set_title(title)
     ax.set_xlabel('Score')
     ax.set_ylabel('Count')
@@ -589,7 +688,7 @@ plt.tight_layout()
 plt.show()
 ```
 
-Higher separation between Genuine (green) and Impostor (red) distributions indicates better discriminative ability.
+Higher separation between Genuine (green) and Impostor (red) distributions indicates better discriminative ability. With ArcFace embeddings, the Embedding subplot should show the clearest separation.
 
 ---
 
@@ -628,47 +727,96 @@ Diagonal cells (same person) should show high scores (green); off-diagonal (diff
 
 ### Cell 13: Weight Optimization (Grid Search)
 
+> Updated 2026-02-10: 3-way grid search over (embedding, geometric, descriptor) weights when ArcFace is available.
+
 ```python
 # ============================================================
-# Cell 13: Weight Optimization (Grid Search)
+# Cell 13: Weight Optimization (updated 2026-02-10: 3-way grid search)
 # ============================================================
 
 from sklearn.metrics import f1_score as sk_f1_score
 
-alphas = np.arange(0.0, 1.05, 0.05)
 results_grid = []
 
-for alpha in alphas:
-    beta = 1.0 - alpha
-    fused = alpha * geo_scores + beta * desc_scores
+if HAS_EMBEDDINGS:
+    # 3-way grid search: (w_emb, w_geo, w_desc) must sum to 1.0
+    step = 0.05
+    for w_emb in np.arange(0.0, 1.0 + step, step):
+        for w_geo in np.arange(0.0, 1.0 - w_emb + step, step):
+            w_desc = round(1.0 - w_emb - w_geo, 2)
+            if w_desc < -0.01:
+                continue
+            w_desc = max(0.0, w_desc)
 
-    best_f1, best_thresh = 0.0, 0.5
-    for thresh in np.arange(0.1, 0.95, 0.01):
-        preds = (fused >= thresh).astype(int)
-        f1_val = sk_f1_score(labels, preds, zero_division=0)
-        if f1_val > best_f1:
-            best_f1 = f1_val
-            best_thresh = thresh
+            fused = w_emb * emb_scores + w_geo * geo_scores + w_desc * desc_scores
 
-    results_grid.append({
-        'alpha': round(alpha, 2),
-        'beta': round(beta, 2),
-        'best_f1': best_f1,
-        'best_threshold': round(best_thresh, 2),
-    })
+            best_f1, best_thresh = 0.0, 0.5
+            for thresh in np.arange(0.1, 0.95, 0.01):
+                preds = (fused >= thresh).astype(int)
+                f1_val = sk_f1_score(labels, preds, zero_division=0)
+                if f1_val > best_f1:
+                    best_f1 = f1_val
+                    best_thresh = thresh
 
-best = max(results_grid, key=lambda x: x['best_f1'])
+            results_grid.append({
+                'w_emb': round(w_emb, 2),
+                'w_geo': round(w_geo, 2),
+                'w_desc': round(w_desc, 2),
+                'best_f1': best_f1,
+                'best_threshold': round(best_thresh, 2),
+            })
 
-print(f"{'Alpha':>6} {'Beta':>6} {'Best F1':>8} {'Threshold':>10}")
-print("-" * 35)
-for r in results_grid:
-    marker = " <-- BEST" if r == best else ""
-    print(f"{r['alpha']:>6.2f} {r['beta']:>6.2f} {r['best_f1']:>8.3f} {r['best_threshold']:>10.2f}{marker}")
+    best = max(results_grid, key=lambda x: x['best_f1'])
 
-print(f"\nOptimal: geometric_weight={best['alpha']:.2f}, "
-      f"descriptor_weight={best['beta']:.2f}, "
-      f"threshold={best['best_threshold']:.2f}, "
-      f"F1={best['best_f1']:.3f}")
+    # Show top 10
+    top10 = sorted(results_grid, key=lambda x: -x['best_f1'])[:10]
+    print(f"{'w_emb':>6} {'w_geo':>6} {'w_desc':>7} {'Best F1':>8} {'Threshold':>10}")
+    print("-" * 45)
+    for r in top10:
+        marker = " <-- BEST" if r == best else ""
+        print(f"{r['w_emb']:>6.2f} {r['w_geo']:>6.2f} {r['w_desc']:>7.2f} "
+              f"{r['best_f1']:>8.3f} {r['best_threshold']:>10.2f}{marker}")
+
+    print(f"\nOptimal: embedding_weight={best['w_emb']:.2f}, "
+          f"geometric_weight={best['w_geo']:.2f}, "
+          f"descriptor_weight={best['w_desc']:.2f}, "
+          f"threshold={best['best_threshold']:.2f}, "
+          f"F1={best['best_f1']:.3f}")
+
+else:
+    # Legacy 2-way grid search
+    alphas = np.arange(0.0, 1.05, 0.05)
+    for alpha in alphas:
+        beta = 1.0 - alpha
+        fused = alpha * geo_scores + beta * desc_scores
+
+        best_f1, best_thresh = 0.0, 0.5
+        for thresh in np.arange(0.1, 0.95, 0.01):
+            preds = (fused >= thresh).astype(int)
+            f1_val = sk_f1_score(labels, preds, zero_division=0)
+            if f1_val > best_f1:
+                best_f1 = f1_val
+                best_thresh = thresh
+
+        results_grid.append({
+            'alpha': round(alpha, 2),
+            'beta': round(beta, 2),
+            'best_f1': best_f1,
+            'best_threshold': round(best_thresh, 2),
+        })
+
+    best = max(results_grid, key=lambda x: x['best_f1'])
+
+    print(f"{'Alpha':>6} {'Beta':>6} {'Best F1':>8} {'Threshold':>10}")
+    print("-" * 35)
+    for r in results_grid:
+        marker = " <-- BEST" if r == best else ""
+        print(f"{r['alpha']:>6.2f} {r['beta']:>6.2f} {r['best_f1']:>8.3f} {r['best_threshold']:>10.2f}{marker}")
+
+    print(f"\nOptimal: geometric_weight={best['alpha']:.2f}, "
+          f"descriptor_weight={best['beta']:.2f}, "
+          f"threshold={best['best_threshold']:.2f}, "
+          f"F1={best['best_f1']:.3f}")
 ```
 
 ---
@@ -677,10 +825,18 @@ print(f"\nOptimal: geometric_weight={best['alpha']:.2f}, "
 
 ```python
 # ============================================================
-# Cell 14: Re-evaluate with Optimal Parameters
+# Cell 14: Re-evaluate with Optimal Parameters (updated 2026-02-10)
 # ============================================================
 
-optimal_similarities = best['alpha'] * geo_scores + best['beta'] * desc_scores
+if HAS_EMBEDDINGS:
+    optimal_similarities = (best['w_emb'] * emb_scores
+                           + best['w_geo'] * geo_scores
+                           + best['w_desc'] * desc_scores)
+    weight_str = f"emb={best['w_emb']:.2f}, geo={best['w_geo']:.2f}, desc={best['w_desc']:.2f}"
+else:
+    optimal_similarities = best['alpha'] * geo_scores + best['beta'] * desc_scores
+    weight_str = f"geo={best['alpha']:.2f}, desc={best['beta']:.2f}"
+
 optimal_evaluator = FaceRecognitionEvaluator(threshold=best['best_threshold'])
 
 optimal_result = optimal_evaluator.evaluate(
@@ -692,7 +848,7 @@ optimal_result = optimal_evaluator.evaluate(
 print(f"\n{'='*50}")
 print(f"OPTIMIZED RESULTS")
 print(f"{'='*50}")
-print(f"  Weights:   geo={best['alpha']:.2f}, desc={best['beta']:.2f}")
+print(f"  Weights:   {weight_str}")
 print(f"  Threshold: {best['best_threshold']:.2f}")
 print(f"  Accuracy:  {optimal_result.accuracy:.3f}")
 print(f"  F1 Score:  {optimal_result.f1_score:.3f}")
@@ -708,18 +864,29 @@ print(f"  AUC:       {optimal_result.auc_score:.3f}")
 
 ```python
 # ============================================================
-# Cell 15: Recommended config.yaml Values
+# Cell 15: Recommended config.yaml Values (updated 2026-02-10)
 # ============================================================
 
 print("=" * 60)
 print("RECOMMENDED CONFIG.YAML VALUES")
 print("=" * 60)
-print(f"""
+
+if HAS_EMBEDDINGS:
+    print(f"""
+matching:
+  embedding_weight: {best['w_emb']:.2f}     # ArcFace (primary identity)
+  geometric_weight: {best['w_geo']:.2f}     # ICP + Chamfer (supplementary)
+  descriptor_weight: {best['w_desc']:.2f}    # MASt3R descriptors
+  accept_threshold: {best['best_threshold']:.2f}    # Optimized threshold
+""")
+else:
+    print(f"""
 matching:
   geometric_weight: {best['alpha']:.2f}     # Optimized alpha
   descriptor_weight: {best['beta']:.2f}    # Optimized beta
   accept_threshold: {best['best_threshold']:.2f}    # Optimized threshold
 """)
+
 print(f"Based on {len(subjects)} subjects, {len(similarities)} total pairs")
 print(f"F1={optimal_result.f1_score:.3f}, EER={optimal_result.eer:.3f}, AUC={optimal_result.auc_score:.3f}")
 
@@ -732,6 +899,19 @@ optimal_evaluator.evaluate(
     save_dir=figures_dir,
 )
 print(f"\nFigures saved to {figures_dir}")
+
+# ArcFace-only evaluation for comparison (added 2026-02-10)
+if HAS_EMBEDDINGS:
+    print(f"\n{'='*60}")
+    print("ARCFACE-ONLY EVALUATION (for comparison)")
+    print(f"{'='*60}")
+    emb_only_evaluator = FaceRecognitionEvaluator(threshold=0.5)
+    emb_only_result = emb_only_evaluator.evaluate(
+        emb_scores.tolist(), labels.tolist(), plot=False,
+    )
+    print(f"  ArcFace-only AUC: {emb_only_result.auc_score:.3f}")
+    print(f"  ArcFace-only EER: {emb_only_result.eer:.3f}")
+    print(f"  → This shows the raw discriminative power of ArcFace alone.")
 ```
 
 Copy the output values into the `matching` section of `config.yaml` to apply them to the production system.
@@ -765,6 +945,10 @@ Adjustable via the `config` dictionary in Cell 6.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `embedding_weight` | `0.7` | ArcFace embedding score weight (added 2026-02-10) |
+| `geometric_weight` | `0.3` | Geometric score weight |
+| `descriptor_weight` | `0.0` | MASt3R descriptor weight (disabled by default) |
+| `accept_threshold` | `0.55` | Accept/reject threshold (with ArcFace) |
 | `icp.max_iterations` | `50` | ICP iteration count. More = better accuracy, slower |
 | `icp.max_correspondence_distance` | `0.05` | Max correspondence distance (meters) |
 | `chamfer_alpha` | `30.0` | Decay factor in `exp(-alpha*d)` |
@@ -772,11 +956,8 @@ Adjustable via the `config` dictionary in Cell 6.
 | `match_ratio_weight` | `0.4` | Weight for match ratio in descriptor score |
 | `avg_similarity_weight` | `0.6` | Weight for average cosine similarity |
 | `descriptor_subsample` | `15000` | Descriptor subsample limit |
-| `geometric_weight` | `0.4` | Geometric score weight (alpha) |
-| `descriptor_weight` | `0.6` | Descriptor score weight (beta, alpha+beta=1) |
-| `accept_threshold` | `0.65` | Accept/reject threshold |
 
-> **Tip**: Cell 13's grid search automatically finds optimal alpha, beta, and threshold values.
+> **Tip**: Cell 13's grid search automatically finds optimal weights and threshold values. With ArcFace embeddings, it searches over 3 weight dimensions.
 
 ---
 
@@ -851,67 +1032,61 @@ Check the Cell 4 output for data shapes. Likely causes: empty point cloud (`< 10
 
 ## 9. Directions for Accuracy Improvement
 
-The grid search in Cell 13 exhausts the linear weight/threshold optimization space. However, other improvement avenues remain. The following are organized by expected impact.
+> Updated 2026-02-10: ArcFace integration (Level 3a) is now implemented. The remaining directions focus on further refinement.
 
-### Diagnosis
+### Background
 
-If AUC is near 0.56 and EER near 0.47, the genuine and impostor score distributions overlap almost completely. This is not a threshold issue — it means **the features themselves lack discriminative power**.
+The original system (v1.0) used MASt3R descriptors as the identity signal, yielding AUC ≈ 0.53 and EER ≈ 0.46 (near random chance). Grid search found `descriptor_weight=0.00` as optimal — MASt3R descriptors have **zero identity discrimination** (they are designed for view correspondence, not person identification).
 
-If the grid search yields `descriptor_weight=0.00` as optimal, MASt3R descriptors are not contributing to identity discrimination. MASt3R descriptors are designed for **inter-view correspondence within the same scene**, not for **distinguishing between different identities** (CS2DS-share.md §5.2 assumes "descriptors are more identity-discriminative", but this assumption may not hold in practice).
+**Solution implemented (2026-02-10)**: ArcFace (insightface buffalo_l) added as the primary identity signal. MASt3R retained for 3D reconstruction and anti-spoofing only.
 
-### Level 1: Downstream Improvements (Matching Algorithm Changes Only, No .npz Regeneration)
+### Preparing v2.0 Templates (ArcFace Embeddings)
 
-#### a) Tune `chamfer_alpha`
+Existing v1.0 .npz files can be augmented with ArcFace embeddings using the `augment_npz_with_embeddings.py` script. **This script runs on WSL** (not on Colab), as it requires access to the original source images from the dataset directory.
 
-The current distance-to-score conversion uses `score = exp(-30.0 * chamfer_distance)`. If genuine Chamfer distances cluster around 0.02-0.04, alpha=30 compresses scores to 0.37-0.55, making it hard to exceed any reasonable threshold.
+```bash
+# On WSL (with venv activated):
+python scripts/augment_npz_with_embeddings.py \
+    --npz-dir /path/to/mast3r_outputs \
+    --dataset-dir /path/to/dataset \
+    --output-dir /path/to/augmented_outputs
 
-Add a `chamfer_alpha` search axis to the Cell 13 grid search:
-
-```python
-# Example: search chamfer_alpha alongside fusion weights
-for alpha_geo in [5, 10, 15, 20, 30, 50]:
-    # Recompute geo scores from raw Chamfer distances
-    adjusted_geo = np.exp(-alpha_geo * chamfer_distances)
-    for alpha in alphas:
-        fused = alpha * adjusted_geo + (1-alpha) * desc_scores
-        # ... F1 optimization ...
+# Or augment in-place:
+python scripts/augment_npz_with_embeddings.py \
+    --npz-dir /path/to/mast3r_outputs \
+    --dataset-dir /path/to/dataset \
+    --in-place
 ```
 
-#### b) Global Descriptor Comparison (Alternative to Reciprocal NN)
+After augmentation, upload the v2.0 .npz files to Google Drive for Colab evaluation.
 
-The current reciprocal NN matching performs point-wise correspondence, which may not be effective when MASt3R descriptors are weak at identity discrimination. Statistical approaches may work better:
+### Remaining Improvement Directions
 
-- **Mean descriptor cosine similarity**: Compute the mean descriptor vector as a "whole-face signature" and compare probe vs. enrollment mean vectors directly
-- **Distribution comparison**: Compare the shape of descriptor distributions (same person should have similar feature distributions across the face surface)
+#### a) Tune Geometric Matching (`chamfer_alpha`)
 
-#### c) Score Normalization
+The distance-to-score conversion uses `score = exp(-30.0 * chamfer_distance)`. Adjusting `chamfer_alpha` can improve the supplementary geometric signal.
 
-If geometric/descriptor scores are concentrated in a narrow range, z-score or min-max normalization can spread the range and make thresholding more effective.
+#### b) Increase Authentication Frame Count
 
-### Level 2: Upstream Improvements (Requires .npz Regeneration)
+Auth probes currently use 4 frames. Increasing to 8-12 frames improves MASt3R reconstruction quality and enrollment-probe shape agreement.
 
-#### d) Increase Authentication Frame Count
+#### c) Landmark-Based Pre-Alignment
 
-Auth probes currently use 4 frames for reconstruction, but MASt3R reconstruction quality degrades significantly with few frames. Increasing from 4 to 8-12 frames should substantially improve enrollment-probe shape agreement for the same person.
+Pre-aligning using 3D facial landmarks (nose tip, eye corners) before ICP reduces local-optimum risk.
 
-#### e) Landmark-Based Pre-Alignment
+#### d) Score Normalization
 
-The current PCA-then-ICP alignment is generic, not face-specific. Pre-aligning using 3D landmarks (nose tip, eye corners) before running ICP would reduce the risk of ICP converging to a local optimum.
+z-score or min-max normalization on component scores before fusion.
 
-CS2DS-share.md's "Optional Directions to Explore" mentions:
-> "Per-region analysis: are certain facial areas more reliable?"
+#### e) ArcFace Quality Weighting
 
-This is not yet implemented, but matching within facial sub-regions (nose, eyes, mouth) and assigning higher weights to more discriminative regions could be an effective approach.
+Weight individual frame embeddings by face detection confidence or blur score during aggregation. Currently uses uniform weighting across frames.
 
-### Level 3: Architectural Considerations
+#### f) Future Architectural Enhancements
 
-MASt3R features are designed for 3D reconstruction view-correspondence, not identity discrimination. To fundamentally improve AUC, the following approaches may be considered:
-
-- **Face-specific feature extractors** (ArcFace, CosFace, etc.) used alongside MASt3R
-- **Metric learning** on MASt3R's descriptor space (training to pull same-person descriptors together and push different-person descriptors apart)
-- **Signed Distance Function (SDF)** representations for more robust face shape comparison
-
-These are outside the current design scope (CS2DS-share.md) but are noted as potential future directions.
+- **3D Morphable Model (FLAME)** fitting for pose-invariant shape comparison
+- **Metric learning** on MASt3R descriptor space (if fine-tuning data available)
+- **Multi-view ArcFace**: Extract embeddings from MASt3R-aligned frontalized views
 
 ---
 
@@ -919,5 +1094,8 @@ These are outside the current design scope (CS2DS-share.md) but are noted as pot
 
 - `technical-architecture_whole.md` — Full system architecture (Appendix C: Colab environment setup)
 - `CS2DS-share.md` — Matching algorithm specification (§5.1-5.3, §10)
-- `config.yaml` — System configuration (`matching` section)
-- `core/matching/interfaces.py` — Abstract matcher interface definitions
+- `config.yaml` — System configuration (`matching` + `face_embedding` sections)
+- `core/matching/interfaces.py` — Abstract matcher interface definitions (incl. `EmbeddingMatcher`)
+- `core/face_embedder.py` — ArcFace model wrapper (added 2026-02-10)
+- `core/matching/embedding_matcher.py` — ArcFace cosine similarity matcher (added 2026-02-10)
+- `scripts/augment_npz_with_embeddings.py` — Retrofit ArcFace embeddings into existing .npz files (added 2026-02-10)

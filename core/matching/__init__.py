@@ -9,10 +9,12 @@ Components:
     - interfaces: Abstract base classes for matchers (CS-1 defines)
     - geometric_matcher: 3D shape comparison using ICP (DS-1 implements)
     - descriptor_matcher: Feature vector comparison (DS-1 implements)
+    - embedding_matcher: ArcFace identity embedding comparison (DS-1 implements)
     - score_fusion: Combining match scores (DS-1 implements)
 
 Usage:
     from core.matching import ICPGeometricMatcher, NNDescriptorMatcher, WeightedFusion
+    from core.matching import ArcFaceEmbeddingMatcher, MultiModalFusion
     # or use stubs for early testing:
     from core.matching import StubGeometricMatcher, StubDescriptorMatcher, StubScoreFusion
 """
@@ -21,9 +23,11 @@ from core.matching.interfaces import (
     MatchResult,
     GeometricMatcher,
     DescriptorMatcher,
+    EmbeddingMatcher,
     ScoreFusion,
     StubGeometricMatcher,
     StubDescriptorMatcher,
+    StubEmbeddingMatcher,
     StubScoreFusion,
 )
 
@@ -40,9 +44,19 @@ except ImportError:
     NNDescriptorMatcher = None
 
 try:
+    from core.matching.embedding_matcher import ArcFaceEmbeddingMatcher
+except ImportError:
+    ArcFaceEmbeddingMatcher = None
+
+try:
     from core.matching.score_fusion import WeightedFusion
 except ImportError:
     WeightedFusion = None
+
+try:
+    from core.matching.score_fusion import MultiModalFusion
+except ImportError:
+    MultiModalFusion = None
 
 __all__ = [
     # Data classes
@@ -50,13 +64,17 @@ __all__ = [
     # Abstract interfaces
     "GeometricMatcher",
     "DescriptorMatcher",
+    "EmbeddingMatcher",
     "ScoreFusion",
     # Stub implementations (for testing before DS team delivers)
     "StubGeometricMatcher",
     "StubDescriptorMatcher",
+    "StubEmbeddingMatcher",
     "StubScoreFusion",
     # DS-1 concrete implementations
     "ICPGeometricMatcher",
     "NNDescriptorMatcher",
+    "ArcFaceEmbeddingMatcher",
     "WeightedFusion",
+    "MultiModalFusion",
 ]

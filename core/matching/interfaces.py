@@ -141,6 +141,50 @@ class DescriptorMatcher(ABC):
         pass
 
 
+class EmbeddingMatcher(ABC):
+    """
+    Abstract base class for global face embedding matching.
+
+    Compares pre-extracted identity embeddings (e.g. ArcFace 512-dim)
+    to determine if two faces belong to the same person. This is the
+    primary identity signal, replacing MASt3R descriptors which lack
+    identity discrimination.
+
+    DS-1 implements this in: core/matching/embedding_matcher.py
+
+    Typical approach:
+        1. Load pre-extracted embeddings from templates
+        2. Compute cosine similarity between probe and template embeddings
+        3. Map similarity to [0, 1] score
+    """
+
+    @abstractmethod
+    def compare(
+        self,
+        probe_embedding: np.ndarray,
+        template_embedding: np.ndarray,
+    ) -> MatchResult:
+        """
+        Compare two face identity embeddings.
+
+        Args:
+            probe_embedding: Identity embedding from authentication capture.
+                            Shape: (D,) where D is embedding dimension (typically 512).
+                            Must be L2-normalized.
+            template_embedding: Identity embedding from enrolled template.
+                               Shape: (D,).
+
+        Returns:
+            MatchResult with identity similarity score.
+
+        Note:
+            - Embeddings should be L2-normalized before comparison
+            - Cosine similarity of unit vectors = dot product
+            - Score remapped from [-1, 1] to [0, 1]
+        """
+        pass
+
+
 class ScoreFusion(ABC):
     """
     Abstract base class for combining match scores.
@@ -249,6 +293,33 @@ class StubDescriptorMatcher(DescriptorMatcher):
                 "descriptor_dim": probe_desc.shape[1] if len(probe_desc) > 0 else 0,
             },
             is_match=True,  # Stub always matches
+        )
+
+
+class StubEmbeddingMatcher(EmbeddingMatcher):
+    """
+    Placeholder embedding matcher that always returns a fixed score.
+
+    Use this for testing the pipeline before ArcFace embeddings are available.
+    """
+
+    def __init__(self, default_score: float = 0.5):
+        self.default_score = default_score
+
+    def compare(
+        self,
+        probe_embedding: np.ndarray,
+        template_embedding: np.ndarray,
+    ) -> MatchResult:
+        """Return a fixed score for any input."""
+        return MatchResult(
+            score=self.default_score,
+            details={
+                "method": "stub",
+                "probe_dim": probe_embedding.shape[0] if probe_embedding is not None else 0,
+                "template_dim": template_embedding.shape[0] if template_embedding is not None else 0,
+            },
+            is_match=True,
         )
 
 

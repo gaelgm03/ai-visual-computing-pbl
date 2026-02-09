@@ -97,6 +97,7 @@ class FaceTemplate:
     colors: np.ndarray       # (N, 3) uint8
     enrollment_metadata: Dict[str, Any] = field(default_factory=dict)
     version: str = "1.0"
+    face_embedding: Optional[np.ndarray] = None  # (512,) float32, ArcFace identity embedding
 
     def __post_init__(self):
         """Validate template data after initialization."""
@@ -120,6 +121,13 @@ class FaceTemplate:
             f"confidence must have {n_points} points, got {len(self.confidence)}"
         assert self.colors.shape == (n_points, 3), \
             f"colors must be (N, 3), got {self.colors.shape}"
+
+        # Validate face embedding if present
+        if self.face_embedding is not None:
+            if self.face_embedding.dtype != np.float32:
+                self.face_embedding = self.face_embedding.astype(np.float32)
+            assert self.face_embedding.ndim == 1, \
+                f"face_embedding must be 1D, got shape {self.face_embedding.shape}"
 
     @property
     def n_points(self) -> int:
@@ -315,14 +323,16 @@ class TemplateManager:
 
         # Save to .npz file
         template_path = self._get_template_path(template.user_id)
-        np.savez_compressed(
-            str(template_path),
+        save_kwargs = dict(
             point_cloud=template.point_cloud,
             descriptors=template.descriptors,
             confidence=template.confidence,
             colors=template.colors,
-            metadata=json.dumps(metadata)
+            metadata=json.dumps(metadata),
         )
+        if template.face_embedding is not None:
+            save_kwargs["face_embedding"] = template.face_embedding
+        np.savez_compressed(str(template_path), **save_kwargs)
 
         # Register in database
         conn = self._get_connection()
@@ -385,6 +395,11 @@ class TemplateManager:
             data = np.load(str(template_path), allow_pickle=True)
             metadata = json.loads(str(data["metadata"]))
 
+            # Load face embedding if available (v2 templates)
+            face_embedding = None
+            if "face_embedding" in data:
+                face_embedding = data["face_embedding"]
+
             template = FaceTemplate(
                 user_id=metadata.get("user_id", user_id),
                 user_name=metadata.get("user_name", "Unknown"),
@@ -393,7 +408,8 @@ class TemplateManager:
                 confidence=data["confidence"],
                 colors=data["colors"],
                 enrollment_metadata=metadata,
-                version=metadata.get("template_version", "1.0")
+                version=metadata.get("template_version", "1.0"),
+                face_embedding=face_embedding,
             )
 
             logger.debug(f"Loaded template for {template.user_name} ({template.n_points} points)")

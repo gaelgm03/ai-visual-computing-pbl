@@ -112,13 +112,25 @@ keyframe:
   export_dir: "storage/demo_keyframes"
 
 # ============================================================
+# Face Embedding Configuration (ArcFace identity recognition)
+# Produces 512-dim identity-discriminative embeddings.
+# This is the PRIMARY identity signal (replaces MASt3R descriptors).
+# ============================================================
+face_embedding:
+  model: "buffalo_l"            # insightface model bundle (ArcFace R100)
+  embedding_dim: 512
+  device: "cuda"                # "cuda" or "cpu" (fallback if ONNX incompatible)
+  backend: "auto"               # "insightface", "facenet", or "auto" (try insightface first)
+
+# ============================================================
 # Matching Configuration (DS team tunes these)
 # ============================================================
 matching:
-  geometric_weight: 0.4       # α in score fusion
-  descriptor_weight: 0.6      # β in score fusion (α + β = 1)
-  accept_threshold: 0.65      # final score threshold for accept
-  
+  embedding_weight: 0.7         # ArcFace embedding (primary identity signal)
+  geometric_weight: 0.3         # ICP + Chamfer (supplementary 3D shape signal)
+  descriptor_weight: 0.0        # MASt3R descriptors (disabled — no identity discrimination)
+  accept_threshold: 0.55        # final score threshold for accept (to be tuned via grid search)
+
   icp:
     max_iterations: 50
     convergence_threshold: 1e-6

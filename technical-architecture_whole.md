@@ -1,8 +1,12 @@
 # MASt3R-Based Face Authentication System — Technical Architecture
 
 > **Audience**: CS-1 (Infrastructure & Integration Lead) and CS-2 (UI/UX & Demo Pipeline Lead)
-> **Version**: 1.0 | Draft
-> **Last Updated**: 2026-02-05
+> **Version**: 2.0 | Draft
+> **Last Updated**: 2026-02-10
+>
+> **Changelog**:
+> - v2.0 (2026-02-10): Added ArcFace face recognition integration (§2, §3, §4.4–4.6, §5, §6.2, §8.2, §9.1, §13). MASt3R descriptors replaced by ArcFace embeddings as primary identity signal; MASt3R retained for 3D reconstruction and anti-spoofing.
+> - v1.0 (2026-02-05): Initial architecture document.
 
 ---
 
@@ -92,6 +96,7 @@ A Face ID-like prototype that performs real-time face enrollment and authenticat
 | Layer | Technology | Rationale |
 |---|---|---|
 | **3D Reconstruction** | MASt3R (ViTLarge, metric checkpoint) | Core model — dense pointmaps + descriptors from RGB pairs |
+| **Face Recognition** | ArcFace (insightface buffalo_l) | 512-dim identity embeddings — primary identity signal. Added 2026-02-10 |
 | **Face Detection** | MediaPipe Face Mesh (or dlib 68-landmark) | Lightweight, real-time, provides 468 3D landmarks for face region cropping |
 | **Deep Learning Runtime** | PyTorch 2.x + CUDA 12.x | MASt3R dependency; works on both RTX 5070 Laptop and Colab T4 |
 | **Backend API** | FastAPI + uvicorn | Async support, WebSocket for streaming, auto-generated OpenAPI docs |
@@ -122,13 +127,15 @@ face-auth-mast3r/
 │   ├── mast3r_engine.py            # MASt3R model loading + inference wrapper
 │   ├── global_alignment.py         # Multi-view point cloud fusion
 │   ├── template_manager.py         # Template CRUD operations
+│   ├── face_embedder.py            # ArcFace identity embedding extraction (added 2026-02-10)
 │   ├── anti_spoof.py               # Liveness / planarity detection
 │   └── matching/                   # ─── DS Team Fills Internals ───
 │       ├── __init__.py
 │       ├── geometric_matcher.py    # ICP + Chamfer distance
-│       ├── descriptor_matcher.py   # MASt3R descriptor comparison
-│       ├── score_fusion.py         # Weighted combination → decision
-│       └── interfaces.py           # Abstract base classes (CS-1 defines)
+│       ├── descriptor_matcher.py   # MASt3R descriptor comparison (supplementary)
+│       ├── embedding_matcher.py    # ArcFace cosine similarity (primary identity, added 2026-02-10)
+│       ├── score_fusion.py         # Weighted combination → decision (MultiModalFusion added 2026-02-10)
+│       └── interfaces.py           # Abstract base classes (EmbeddingMatcher added 2026-02-10)
 │
 ├── api/                            # ─── CS-1 Defines, CS-2 Consumes ───
 │   ├── __init__.py
@@ -156,7 +163,9 @@ face-auth-mast3r/
 ├── scripts/
 │   ├── setup_mast3r.sh             # Clone MASt3R repo + download weights
 │   ├── run_demo.sh                 # Launch full system
-│   └── test_inference.py           # Smoke test for MASt3R inference
+│   ├── test_inference.py           # Smoke test for MASt3R inference
+│   ├── prepare_public_dataset.py   # Dataset → MASt3R + ArcFace → .npz templates
+│   └── augment_npz_with_embeddings.py  # Retrofit ArcFace embeddings into existing .npz (added 2026-02-10)
 │
 ├── tests/
 │   ├── test_face_detector.py
@@ -349,11 +358,12 @@ class FaceTemplate:
     user_id: str
     user_name: str
     point_cloud: np.ndarray     # (N, 3) — 3D geometry
-    descriptors: np.ndarray     # (N, D) — dense features
+    descriptors: np.ndarray     # (N, D) — dense features (supplementary)
     confidence: np.ndarray      # (N,)
     colors: np.ndarray          # (N, 3) — for visualization
+    face_embedding: Optional[np.ndarray]  # (512,) — ArcFace identity embedding (added 2026-02-10)
     enrollment_metadata: dict   # Timestamp, n_frames, coverage stats
-    version: str = "1.0"
+    version: str = "2.0"        # "2.0" when face_embedding is present (updated 2026-02-10)
 
 class TemplateManager:
     """Persist and retrieve face templates."""
@@ -413,6 +423,14 @@ class DescriptorMatcher(ABC):
         """Compare descriptor sets, optionally using 3D positions."""
         ...
 
+# Added 2026-02-10: ArcFace embedding comparison interface
+class EmbeddingMatcher(ABC):
+    @abstractmethod
+    def compare(self, probe_embedding: np.ndarray,
+                template_embedding: np.ndarray) -> MatchResult:
+        """Compare face identity embeddings (e.g., ArcFace 512-dim)."""
+        ...
+
 class ScoreFusion(ABC):
     @abstractmethod
     def fuse(self, geometric_result: MatchResult,
@@ -430,11 +448,58 @@ class StubGeometricMatcher(GeometricMatcher):
         return MatchResult(score=0.5, details={"method": "stub"}, is_match=True)
 ```
 
+### 4.6 `core/face_embedder.py` (Added 2026-02-10)
+
+**Owner**: CS-1
+
+ArcFace identity embedding extractor. This is the **primary identity signal** — MASt3R descriptors are retained for 3D reconstruction but have no identity discrimination power (see §8.2).
+
+```python
+class FaceEmbedder:
+    """Extract ArcFace face identity embeddings from face images."""
+
+    def __init__(self, config: dict):
+        # config keys: model ("buffalo_l"), device ("cuda"/"cpu"), backend ("auto")
+        # Backend priority: insightface (ONNX) > facenet-pytorch > error
+        ...
+
+    def load_model(self) -> None:
+        """Load ArcFace model. Call once at startup."""
+        ...
+
+    def extract_embedding(self, face_image: np.ndarray) -> Optional[np.ndarray]:
+        """
+        Extract identity embedding from a single face image.
+
+        Args:
+            face_image: BGR image containing a face.
+
+        Returns:
+            (512,) float32 L2-normalized embedding, or None if no face detected.
+        """
+        ...
+
+    def extract_multi_frame(
+        self, face_images: List[np.ndarray],
+        quality_scores: Optional[List[float]] = None,
+    ) -> Optional[np.ndarray]:
+        """
+        Extract and aggregate embeddings across multiple frames.
+        Uses quality-weighted mean aggregation.
+
+        Returns:
+            (512,) float32 L2-normalized aggregated embedding.
+        """
+        ...
+```
+
 ---
 
 ## 5. Data Flow & Pipeline Design
 
 ### 5.1 Enrollment Data Flow
+
+> Updated 2026-02-10: Added ArcFace embedding extraction branch.
 
 ```
 Webcam → Frame(BGR)
@@ -456,15 +521,21 @@ Webcam → Frame(BGR)
   │     ├─ For each pair: infer_pair() → pointmaps + descriptors
   │     └─ global_alignment() → fused point cloud + aggregated descriptors
   │
+  ├─[FaceEmbedder.extract_multi_frame(face_crops)]     ← Added 2026-02-10
+  │     └─ quality-weighted mean → 512-dim identity embedding
+  │
   ├─[Face Region Cropping in 3D]
   │     Use 2D face landmarks → project to 3D → filter points outside face mask
   │
   ├─[TemplateManager.save_template()]
+  │     Template v2.0: point_cloud + descriptors + face_embedding(512,) + metadata
   │
   └─→ Response: EnrollmentResult (success, user_id, preview_point_cloud)
 ```
 
 ### 5.2 Authentication Data Flow
+
+> Updated 2026-02-10: Added ArcFace embedding matching as primary identity signal.
 
 ```
 Webcam → Capture 2-4 frames (with slight head movement prompt)
@@ -474,16 +545,20 @@ Webcam → Capture 2-4 frames (with slight head movement prompt)
   ├─[MASt3REngine.infer_pair() or reconstruct_multiview()]
   │     → probe_cloud, probe_descriptors
   │
+  ├─[FaceEmbedder.extract_multi_frame(face_crops)]     ← Added 2026-02-10
+  │     → probe_embedding (512-dim)
+  │
   ├─[AntiSpoof.check(probe_cloud, confidence)]
-  │     → liveness_result (pass/fail + planarity_score)
+  │     → liveness_result (pass/fail + planarity_score)  ← gate: blocks if fail
   │
   ├─[TemplateManager.load_template(claimed_user_id)]  # 1:1 verification
   │   OR
   │  [TemplateManager.load_all_templates()]             # 1:N identification
   │
-  ├─[GeometricMatcher.compare(probe, template)]  → geometric_score
-  ├─[DescriptorMatcher.compare(probe, template)] → descriptor_score
-  ├─[ScoreFusion.fuse()]                          → final_decision
+  ├─[EmbeddingMatcher.compare(probe_emb, template_emb)]  → embedding_score  (PRIMARY)
+  ├─[GeometricMatcher.compare(probe_cloud, template_cloud)]  → geometric_score  (supplementary)
+  ├─[MultiModalFusion.fuse({embedding, geometric})]       → final_decision
+  │     final = 0.7 × embedding + 0.3 × geometric
   │
   └─→ Response: AuthResult (is_match, score, matched_user, details)
 ```
@@ -548,8 +623,9 @@ Response:
     "matched_user_id": "usr_a1b2c3",
     "matched_user_name": "Alice",
     "final_score": 0.87,
+    "embedding_score": 0.92,          // ArcFace cosine similarity (added 2026-02-10)
     "geometric_score": 0.82,
-    "descriptor_score": 0.91,
+    "descriptor_score": 0.91,         // Legacy — weight 0.0 by default
     "anti_spoof": {
         "passed": true,
         "depth_variance": 0.043,
@@ -659,30 +735,38 @@ Capture 2-4 frames with slight movement. Even 2 frames suffice for MASt3R (it's 
 
 ### 8.2 Matching Pipeline
 
-```
-probe_cloud (N_p, 3)  +  probe_desc (N_p, D)
-template_cloud (N_t, 3) + template_desc (N_t, D)
+> Updated 2026-02-10: ArcFace embedding matching is now the primary identity signal.
+> MASt3R descriptors have been experimentally shown to have **zero identity discrimination**
+> (EER ≈ 0.46, AUC ≈ 0.53 — near random chance). The descriptor weight is set to 0.0 by default.
 
-Step 1: Pre-alignment
+```
+probe_cloud (N_p, 3) + probe_embedding (512,)
+template_cloud (N_t, 3) + template_embedding (512,)
+
+Step 1: Embedding Matching (PRIMARY — added 2026-02-10)
+  - ArcFace 512-dim L2-normalized identity embeddings
+  - cosine_similarity = dot(probe_emb, template_emb)
+  - score = (cosine_similarity + 1) / 2  →  [0, 1]
+
+Step 2: Pre-alignment (for geometric matching)
   - Coarse alignment using PCA on both point clouds
     (align principal axes to canonical frame)
   - Or: use centroid alignment + uniform scaling
 
-Step 2: Geometric Matching (→ DS team refines this)
+Step 3: Geometric Matching (supplementary — DS team refines this)
   - ICP refinement after pre-alignment
   - Compute bidirectional Chamfer distance
   - Normalize to [0, 1] score
 
-Step 3: Descriptor Matching (→ DS team refines this)
-  - For each point in probe, find nearest neighbor in template descriptor space
-  - Apply reciprocal check (mutual nearest neighbor)
-  - Count of reciprocal matches / total points → match ratio
-  - Mean cosine similarity of matched pairs → descriptor score
+Step 4: Descriptor Matching (disabled by default — weight 0.0)
+  - MASt3R descriptors lack identity discrimination (designed for view correspondence)
+  - Retained for backward compatibility; can be re-enabled if fine-tuned
 
-Step 4: Score Fusion (→ DS team tunes weights)
-  - final_score = α * geometric_score + β * descriptor_score
-  - Default: α=0.4, β=0.6 (descriptors are more identity-discriminative)
-  - is_match = final_score > threshold (default: 0.65)
+Step 5: Multi-Modal Score Fusion (→ DS team tunes weights)
+  - final_score = w_emb × embedding_score + w_geo × geometric_score + w_desc × descriptor_score
+  - Default: w_emb=0.7, w_geo=0.3, w_desc=0.0
+  - is_match = final_score ≥ threshold (default: 0.55)
+  - Missing channels are dynamically re-normalized (for v1 templates without embeddings)
 ```
 
 ---
@@ -691,15 +775,18 @@ Step 4: Score Fusion (→ DS team tunes weights)
 
 ### 9.1 File Format (`.npz`)
 
+> Updated 2026-02-10: Template v2.0 adds `face_embedding` field for ArcFace identity.
+
 Each enrolled user gets one `.npz` file:
 
 ```python
 np.savez_compressed(
     filepath,
     point_cloud=cloud,          # (N, 3) float32
-    descriptors=descriptors,    # (N, D) float32
+    descriptors=descriptors,    # (N, D) float32 — supplementary (no identity discrimination)
     confidence=confidence,      # (N,)   float32
     colors=colors,              # (N, 3) uint8
+    face_embedding=embedding,   # (512,) float32 — L2-normalized ArcFace identity embedding (v2.0)
     metadata=json.dumps({       # serialized as string
         "user_id": "usr_a1b2c3",
         "user_name": "Alice",
@@ -708,7 +795,9 @@ np.savez_compressed(
         "yaw_range": [-28.0, 25.0],
         "pitch_range": [-12.0, 14.0],
         "mast3r_version": "ViTLarge_metric",
-        "template_version": "1.0"
+        "template_version": "2.0",      # "2.0" when face_embedding present
+        "embedding_model": "buffalo_l", # ArcFace model used
+        "embedding_dim": 512
     })
 )
 ```
@@ -861,6 +950,7 @@ with torch.no_grad():
 | Operation | RTX 5070 Laptop (FP16) | Colab T4 (FP16) | Notes |
 |---|---|---|---|
 | Face detection (MediaPipe) | ~10 ms/frame | ~15 ms/frame | CPU-bound |
+| ArcFace embedding (per face) | ~5-10 ms | ~10-15 ms | ONNX Runtime (added 2026-02-10) |
 | MASt3R pair inference | ~0.3-0.5 s/pair | ~0.8-1.2 s/pair | T4 is ~2x slower than RTX 5070 |
 | Global alignment (12 frames, 24 pairs) | ~5-8 s | ~12-20 s | Mixed CPU/GPU |
 | ICP alignment | ~0.1-0.3 s | ~0.2-0.4 s | CPU (Open3D) |
@@ -945,10 +1035,18 @@ authentication:
   max_frames: 4
   mode: "verification"        # "verification" (1:1) or "identification" (1:N)
 
+# Added 2026-02-10: ArcFace face recognition embeddings
+face_embedding:
+  model: "buffalo_l"            # insightface model bundle (ArcFace R100)
+  embedding_dim: 512
+  device: "cuda"                # "cuda" or "cpu"
+  backend: "auto"               # "insightface", "facenet", or "auto"
+
 matching:
-  geometric_weight: 0.4       # α — DS team tunes
-  descriptor_weight: 0.6      # β — DS team tunes
-  accept_threshold: 0.65      # DS team tunes via ROC analysis
+  embedding_weight: 0.7         # ArcFace (primary identity signal) — added 2026-02-10
+  geometric_weight: 0.3         # ICP + Chamfer (supplementary 3D shape)
+  descriptor_weight: 0.0        # MASt3R descriptors (disabled — no identity discrimination)
+  accept_threshold: 0.55        # DS team tunes via grid search
   icp_max_iterations: 50
   icp_convergence_threshold: 1e-6
   chamfer_normalization: "mean"
@@ -1033,8 +1131,8 @@ Google Drive (shared folder — large binary files only, NOT code)
     │       └── subject_002/
     │           └── ...
     ├── mast3r_outputs/            # Pre-computed by CS-1 on RTX 5070
-    │   ├── alice_enrollment.npz   # {point_cloud, descriptors, confidence}
-    │   ├── alice_probe_01.npz
+    │   ├── alice_enrollment.npz   # {point_cloud, descriptors, confidence, face_embedding}
+    │   ├── alice_probe_01.npz     #   face_embedding: (512,) ArcFace (v2.0, added 2026-02-10)
     │   └── bob_enrollment.npz
     └── evaluation_results/        # DS team writes here
 ```
@@ -1226,7 +1324,7 @@ Place test images in `tests/fixtures/`:
 | Colab session timeout / data loss | Lose experiment progress | Always save to Google Drive, not `/content/`; use Colab notebook checkpointing |
 | Only CS-1's laptop can run the full real-time pipeline | Bus factor = 1 for demo | Document setup thoroughly; rehearse demo well in advance; have pre-recorded video as backup |
 | 512px input limit may lose fine facial detail | Reduced discriminative power | Crop tightly to face before sending to MASt3R (maximize face pixel coverage) |
-| MASt3R not trained on faces specifically | Potential quality issues on close-up face images | Test early; if results are poor, consider face-specific fine-tuning as stretch goal |
+| MASt3R not trained on faces specifically | Descriptors have zero identity discrimination (EER≈0.46) | ArcFace added as primary identity signal (2026-02-10); MASt3R retained for 3D reconstruction + anti-spoofing only |
 | CC BY-NC-SA 4.0 license on MASt3R | Cannot use commercially | Acceptable for academic project; document in README |
 | Global alignment is slow for many pairs | Enrollment > 15s may frustrate users | Limit to 12 keyframes; optimize pair selection |
 | Two-person face confusion under poor lighting | False accept | Ensure demo venue has adequate lighting; mention as limitation |
