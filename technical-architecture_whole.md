@@ -288,20 +288,26 @@ class MASt3REngine:
     def reconstruct_multiview(
         self,
         frames: List[np.ndarray],
-        pairs: Optional[List[Tuple[int, int]]] = None
+        pairs: Optional[List[Tuple[int, int]]] = None,
+        head_poses: Optional[List[Tuple[float, float, float]]] = None,
+        confidence_threshold: Optional[float] = None,
+        use_global_alignment: bool = True,
+        global_alignment_config: Optional[Dict[str, Any]] = None,
     ) -> MultiViewResult:
         """
         Reconstruct a unified 3D point cloud from multiple frames.
-        Uses MASt3R pairwise inference + global alignment.
-
-        > **@2026-02-07 Pipeline Test**: Currently simplified implementation
-        > (no global alignment, simple accumulation of pairwise results).
-        > May be reverted or enhanced later.
+        Uses MASt3R-SfM sparse_global_alignment for globally consistent
+        3D reconstruction with optimized camera poses.
 
         Args:
             frames: List of RGB face crops.
-            pairs: Explicit pairing strategy. If None, uses sequential +
-                   skip-one pairs: [(0,1),(1,2),(2,3),...,(0,2),(1,3),...].
+            pairs: Explicit pairing strategy. If None, auto-generated
+                   using pose-aware K-nearest neighbor pairing (when
+                   head_poses provided) or all-pairs for small N.
+            head_poses: Optional (yaw, pitch, roll) per frame for
+                        angular proximity pairing.
+            confidence_threshold: Min confidence to keep a point.
+                                  If None, reads from config.yaml.
 
         Returns:
             MultiViewResult:
@@ -314,20 +320,23 @@ class MASt3REngine:
         ...
 
     @staticmethod
-    def generate_pair_indices(n_frames: int) -> List[Tuple[int, int]]:
+    def generate_pair_indices(
+        n_frames: int,
+        head_poses: Optional[List[Tuple[float, float, float]]] = None,
+        min_neighbors: int = 3,
+        max_neighbors: int = 8,
+    ) -> List[Tuple[int, int]]:
         """
-        Generate a reasonable set of image pairs for n_frames.
-        Strategy: sequential pairs + skip-1 pairs for loop closure.
-        Avoids quadratic blowup for large n.
+        Generate image pairs for multi-view reconstruction.
+
+        When head_poses are provided, uses angular proximity to pair
+        each frame with its K nearest neighbors (K between min_neighbors
+        and max_neighbors). This avoids pairing frames with very
+        different viewing angles which produce poor matches.
+
+        Fallback: all-pairs for small N, sequential+skip for large N.
         """
-        pairs = []
-        for i in range(n_frames - 1):
-            pairs.append((i, i + 1))          # Sequential
-        for i in range(n_frames - 2):
-            pairs.append((i, i + 2))          # Skip-1
-        if n_frames > 5:
-            pairs.append((0, n_frames - 1))   # Loop closure
-        return pairs
+        ...
 ```
 
 ### 4.4 `core/template_manager.py`
@@ -584,25 +593,21 @@ During enrollment, the user slowly rotates their head. The system captures keyfr
 
 ### 7.2 Pair Generation for MASt3R
 
-Given N keyframes sorted by capture order, generate pairs:
+Given N keyframes with head pose information, pairs are generated using **pose-aware K-nearest neighbor pairing**:
 
 ```python
-# Sequential pairs: capture temporal coherence
-sequential = [(i, i+1) for i in range(N-1)]
+# For each frame, compute angular distance to all other frames
+# using (yaw, pitch) Euclidean distance, then pair with K nearest.
+# K = min(max_neighbors, N-1), clamped to [min_neighbors, max_neighbors].
+# Default: min_neighbors=3, max_neighbors=8.
 
-# Skip-1 pairs: wider baseline for better 3D triangulation
-skip_one = [(i, i+2) for i in range(N-2)]
+# Example for N=12, K=8: produces ~56 pairs
+# (compared to 66 all-pairs or ~24 sequential+skip)
 
-# Loop closure: connect first and last for global consistency
-closure = [(0, N-1)]
-
-# Optional: connect frontal frame to most extreme left/right
-# (identified by max |yaw| delta)
-
-all_pairs = sequential + skip_one + closure
+pairs = generate_pair_indices(n_frames, head_poses=head_poses)
 ```
 
-For N=12 frames, this produces ~24 pairs (well under quadratic blowup of 66).
+This avoids pairing frames with very different viewing angles (e.g., left profile vs right profile) which produce poor MASt3R matches, while ensuring sufficient connectivity for global alignment. Fallback: all-pairs for small N when head poses are unavailable.
 
 ### 7.3 MASt3R Inference Flow (per pair)
 
@@ -625,22 +630,20 @@ with torch.no_grad():
 
 ### 7.4 Global Alignment
 
-> **@2026-02-07 Pipeline Test**: Current implementation uses simplified
-> point accumulation for end-to-end pipeline validation. Full global
-> alignment (as described below) is planned for a future phase.
+Uses MASt3R-SfM's `sparse_global_alignment` (implemented in `core/global_alignment.py`):
+- Input: RGB frames, pair indices, and the loaded MASt3R model
+- Process: two-stage optimization — coarse 3D alignment (niter1=300, lr1=0.07) followed by fine 2D reprojection refinement (niter2=500, lr2=0.014)
+- Output: globally consistent 3D point cloud with optimized camera poses and per-point confidence
+- Parameters are configurable via `config.yaml` `global_alignment` section
 
-Uses MASt3R-SfM's `sparse_global_alignment`:
-- Input: all pairwise pointmaps and their confidence maps
-- Output: globally consistent 3D point cloud with optimized camera poses
-- This resolves scale/rotation ambiguity across pairs
+### 7.5 Post-Processing Pipeline
 
-### 7.5 Face Region Extraction from 3D Cloud
+After global alignment, the raw point cloud undergoes a multi-stage noise removal pipeline (all parameters configurable via `config.yaml` `post_processing` section):
 
-After global alignment, we have a full 3D reconstruction that may include background. To isolate the face:
-
-1. For each source frame, use MediaPipe landmarks to create a 2D face mask (convex hull of face outline landmarks)
-2. Each 3D point has a known 2D pixel origin — filter points whose pixel falls outside the face mask
-3. Additionally, apply a statistical outlier filter (Open3D: `remove_statistical_outlier`) to clean noise
+1. **Confidence filtering**: Remove points with MASt3R confidence below threshold (default ≥1.5; values >1 are considered reliable by MASt3R)
+2. **Voxel deduplication**: Quantize points to a 3D grid (default 10mm voxel size), keeping the highest-confidence point per voxel. Merges double-layer artifacts from overlapping views
+3. **Statistical outlier removal**: For each point, compute mean distance to K nearest neighbors (default K=30). Remove points whose mean distance exceeds `global_mean + std_ratio × global_std` (default std_ratio=1.5). Eliminates isolated floating noise
+4. **Largest-cluster filter**: Build a K-NN graph (default K=10) and connect points within distance `eps` (default 15mm). Keep only the largest connected component, discarding small scattered debris clusters
 
 ---
 

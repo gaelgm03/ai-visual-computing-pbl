@@ -29,7 +29,7 @@ frontend:
   
   # Authentication UI settings
   auth:
-    capture_frames: 3
+    capture_frames: 4
     frame_delay_ms: 200
   
   # Visualization settings

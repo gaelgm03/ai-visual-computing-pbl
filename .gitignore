@@ -66,6 +66,7 @@ mast3r-face-auth/
 .DS_Store
 Thumbs.db
 Desktop.ini
+nul
 
 # ============================================================
 # Jupyter
