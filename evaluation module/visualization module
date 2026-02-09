@@ -1,0 +1,51 @@
+def _plot_similarity_distribution(self, similarities, labels):
+    plt.figure()
+    plt.hist(similarities[labels == 1], bins=25, alpha=0.7, label="Genuine")
+    plt.hist(similarities[labels == 0], bins=25, alpha=0.7, label="Impostor")
+    plt.axvline(self.threshold)
+    plt.xlabel("Similarity Score")
+    plt.ylabel("Count")
+    plt.title("Similarity Score Distribution")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+def _plot_confusion_matrix(self, cm):
+    disp = ConfusionMatrixDisplay(
+        confusion_matrix=cm,
+        display_labels=["Impostor", "Genuine"]
+    )
+    disp.plot()
+    plt.title("Confusion Matrix")
+    plt.tight_layout()
+    plt.show()  
+
+def _plot_roc_curve(self, labels, similarities):
+    fpr, tpr, _ = roc_curve(labels, similarities)
+    plt.figure()
+    plt.plot(fpr, tpr)
+    plt.xlabel("False Accept Rate (FAR)")
+    plt.ylabel("True Accept Rate (TAR)")
+    plt.title("ROC Curve")
+    plt.tight_layout()
+    plt.show() 
+
+def _plot_metrics_summary(self, accuracy, precision, recall, f1, far, tar):
+    metrics = {
+        "Accuracy": accuracy,
+        "Precision": precision,
+        "Recall": recall,
+        "F1-score": f1,
+        "FAR": far,
+        "TAR": tar,
+    }
+
+    plt.figure()
+    plt.bar(metrics.keys(), metrics.values())
+    plt.ylim(0, 1)
+    plt.ylabel("Score")
+    plt.title("Evaluation Metrics Summary")
+    plt.xticks(rotation=30)
+    plt.tight_layout()
+    plt.show()
