@@ -29,6 +29,7 @@ Usage:
 Owner: CS-1
 """
 
+import hashlib
 import numpy as np
 import torch
 import tempfile
@@ -55,6 +56,9 @@ class AlignmentResult:
                 Shape: (N, 3), uint8.
         confidence: Per-point confidence values.
                     Shape: (N,).
+        descriptors: Per-point feature descriptors (paired 1:1 with point_cloud).
+                     Shape: (N, D) where D is descriptor dimension.
+                     None if descriptors are unavailable from the scene cache.
         camera_poses: List of 4x4 camera-to-world transformation matrices,
                       one per input frame.
         intrinsics: List of 3x3 camera intrinsic matrices.
@@ -65,6 +69,7 @@ class AlignmentResult:
     confidence: np.ndarray
     camera_poses: List[np.ndarray]
     intrinsics: List[np.ndarray]
+    descriptors: Optional[np.ndarray] = None
     depthmaps: Optional[List[np.ndarray]] = None
 
 
@@ -208,7 +213,7 @@ class GlobalAligner:
             logger.error(f"Global alignment failed: {e}")
             raise RuntimeError(f"Global alignment failed: {e}") from e
 
-        return self._extract_result(scene, image_paths)
+        return self._extract_result(scene, image_paths, cache_path=cache_path)
 
     def align_from_frames(
         self,
@@ -272,20 +277,68 @@ class GlobalAligner:
             except Exception as e:
                 logger.warning(f"Failed to clean up temp dir {temp_dir}: {e}")
 
-    def _extract_result(self, scene: Any, image_paths: List[str]) -> AlignmentResult:
+    @staticmethod
+    def _hash_md5(s: str) -> str:
+        """Replicate MASt3R's hash_md5 for cache path construction."""
+        return hashlib.md5(s.encode('utf-8')).hexdigest()
+
+    def _load_view_descriptors(
+        self, cache_path: str, image_path: str, image_paths: List[str],
+        device: str = 'cpu',
+    ) -> Optional[np.ndarray]:
+        """
+        Load per-view descriptors from the forward_mast3r descriptor cache.
+
+        For a given view, there may be multiple descriptor files (one per pair
+        that includes this view). We load the first available one.
+
+        Returns (H, W, D) numpy array, or None if not available.
+        """
+        from dust3r.utils.device import to_numpy
+
+        img_hash = self._hash_md5(image_path)
+        desc_dir = os.path.join(cache_path, 'desc', img_hash)
+
+        if not os.path.isdir(desc_dir):
+            return None
+
+        desc_files = [f for f in os.listdir(desc_dir) if f.endswith('.pth')]
+        if not desc_files:
+            return None
+
+        # Load first available descriptor (all should have the same shape
+        # since the same image produces the same-sized descriptor map)
+        try:
+            desc = torch.load(
+                os.path.join(desc_dir, desc_files[0]),
+                map_location=device,
+            )
+            return to_numpy(desc)  # (H, W, D)
+        except Exception as e:
+            logger.warning(f"Failed to load descriptors for {image_path}: {e}")
+            return None
+
+    def _extract_result(
+        self, scene: Any, image_paths: List[str],
+        cache_path: Optional[str] = None,
+    ) -> AlignmentResult:
         """
         Extract alignment results from SparseGA scene object.
 
-        Uses get_dense_pts3d() to extract dense point clouds for face reconstruction.
-        The sparse correspondences (get_sparse_pts3d) are used internally by
-        sparse_global_alignment for camera pose optimization.
+        Uses get_dense_pts3d() to extract dense point clouds for face
+        reconstruction. When cache_path is provided and descriptor cache
+        files exist (from the patched forward_mast3r), per-view descriptors
+        are loaded and paired 1:1 with the point cloud.
 
         Args:
             scene: SparseGA object from sparse_global_alignment.
             image_paths: Original image paths for color extraction.
+            cache_path: Path to the MASt3R alignment cache directory.
+                        When provided, enables descriptor extraction.
 
         Returns:
-            AlignmentResult with point cloud, colors, and camera poses.
+            AlignmentResult with point cloud, colors, descriptors, and
+            camera poses.
         """
         from dust3r.utils.device import to_numpy
 
@@ -311,6 +364,24 @@ class GlobalAligner:
             logger.warning("Falling back to sparse points")
             dense_pts3d = scene.get_sparse_pts3d()
 
+        # Load per-view descriptors from cache (if available)
+        view_descs = []
+        has_descriptors = False
+        if cache_path:
+            for i, img_path in enumerate(image_paths):
+                desc = self._load_view_descriptors(
+                    cache_path, img_path, image_paths
+                )
+                view_descs.append(desc)
+            has_descriptors = any(d is not None for d in view_descs)
+            if has_descriptors:
+                logger.info("Loaded per-view descriptors from cache")
+            else:
+                logger.warning(
+                    "No descriptor cache found. Run with patched "
+                    "sparse_ga.py to enable paired descriptors."
+                )
+
         # Get images and colors from scene
         imgs = scene.imgs  # List of RGB images in [0, 1] range
 
@@ -318,6 +389,7 @@ class GlobalAligner:
         all_points = []
         all_colors = []
         all_confidence = []
+        all_descriptors = []
 
         for i, pts in enumerate(dense_pts3d):
             pts_np = to_numpy(pts)
@@ -376,6 +448,25 @@ class GlobalAligner:
             else:
                 all_confidence.append(np.ones(len(valid_pts), dtype=np.float32))
 
+            # Extract descriptors paired with pts3d (same pixel = same index)
+            if has_descriptors and i < len(view_descs) and view_descs[i] is not None:
+                desc_view = view_descs[i]  # (H, W, D)
+                desc_flat = desc_view.reshape(-1, desc_view.shape[-1])  # (H*W, D)
+                # Apply same valid_mask as pts3d to maintain 1:1 pairing
+                if len(desc_flat) == len(valid_mask):
+                    desc_valid = desc_flat[valid_mask]
+                    # Filter NaN/Inf descriptors (set to zero, keep pairing intact)
+                    nan_mask = ~np.isfinite(desc_valid).all(axis=1)
+                    if nan_mask.any():
+                        desc_valid[nan_mask] = 0.0
+                    all_descriptors.append(desc_valid.astype(np.float32))
+                else:
+                    logger.warning(
+                        f"View {i}: descriptor shape {len(desc_flat)} != "
+                        f"pts3d shape {len(valid_mask)}, skipping descriptors"
+                    )
+                    has_descriptors = False
+
         if all_points:
             point_cloud = np.concatenate(all_points, axis=0)
             colors = np.concatenate(all_colors, axis=0)
@@ -384,6 +475,11 @@ class GlobalAligner:
             point_cloud = np.zeros((0, 3), dtype=np.float32)
             colors = np.zeros((0, 3), dtype=np.uint8)
             confidence = np.zeros(0, dtype=np.float32)
+
+        descriptors = None
+        if has_descriptors and all_descriptors:
+            descriptors = np.concatenate(all_descriptors, axis=0)
+            logger.info(f"Paired descriptors: {descriptors.shape}")
 
         # Get depthmaps
         try:
@@ -400,6 +496,7 @@ class GlobalAligner:
             confidence=confidence.astype(np.float32),
             camera_poses=[cam2w[i] for i in range(len(cam2w))],
             intrinsics=[intrinsics[i] for i in range(len(intrinsics))],
+            descriptors=descriptors,
             depthmaps=depthmaps,
         )
 
