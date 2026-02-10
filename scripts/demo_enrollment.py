@@ -241,7 +241,7 @@ def run_reconstruction(keyframes: List[KeyframeCandidate]):
 
     if len(keyframes) < 2:
         print("ERROR: Need at least 2 keyframes for reconstruction.")
-        return None, None, None
+        return None, None
 
     # Import MASt3R engine (lazy import for faster startup)
     print("Loading MASt3R engine...")
@@ -287,7 +287,7 @@ def run_reconstruction(keyframes: List[KeyframeCandidate]):
     except Exception as e:
         print(f"  WARNING: ArcFace embedding extraction failed: {e}")
 
-    return result.point_cloud, result.colors, face_embedding
+    return result, face_embedding
 
 
 def visualize_point_cloud(points: np.ndarray, colors: Optional[np.ndarray],
@@ -506,6 +506,11 @@ def main():
         help="Directory to save visualization HTML with timestamp "
              "(e.g., /mnt/c/Users/sekit/Desktop). If not specified, uses temp file."
     )
+    parser.add_argument(
+        "--user-name", type=str, default=None,
+        help="User name for template registration. "
+             "If provided, saves the template to storage/templates/ for later authentication."
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -546,11 +551,52 @@ def main():
             save_keyframes(keyframes, keyframe_dir)
 
     # Phase 2: 3D Reconstruction + ArcFace Embedding
-    points, colors, face_embedding = run_reconstruction(keyframes)
-    if points is None:
+    recon_result, face_embedding = run_reconstruction(keyframes)
+    if recon_result is None:
         return 1
 
-    # Phase 3: Visualization
+    points = recon_result.point_cloud
+    colors = recon_result.colors
+
+    # Phase 3: Save template (if --user-name provided)
+    template_path = None
+    if args.user_name:
+        from core.template_manager import get_template_manager, FaceTemplate
+        import uuid
+
+        tm = get_template_manager()
+
+        # Check if user already exists
+        if tm.user_exists_by_name(args.user_name):
+            print(f"\nERROR: User '{args.user_name}' already exists. "
+                  f"Delete first or choose a different name.")
+            return 1
+
+        user_id = f"usr_{uuid.uuid4().hex[:8]}"
+        head_poses = [kf.head_pose for kf in keyframes]
+        yaw_values = [p[0] for p in head_poses]
+        pitch_values = [p[1] for p in head_poses]
+
+        template = FaceTemplate(
+            user_id=user_id,
+            user_name=args.user_name,
+            point_cloud=points.astype(np.float32),
+            descriptors=recon_result.descriptors.astype(np.float32),
+            confidence=recon_result.confidence.astype(np.float32),
+            colors=colors.astype(np.uint8) if colors is not None else np.zeros((len(points), 3), dtype=np.uint8),
+            face_embedding=face_embedding,
+            enrollment_metadata={
+                "n_frames": len(keyframes),
+                "yaw_range": [float(min(yaw_values)), float(max(yaw_values))],
+                "pitch_range": [float(min(pitch_values)), float(max(pitch_values))],
+                "n_points": len(points),
+            },
+        )
+        template_path = tm.save_template(template)
+        print(f"\nTemplate saved: {template_path}")
+        print(f"  User: {args.user_name} ({user_id})")
+
+    # Phase 4: Visualization
     output_dir = Path(args.output_dir) if args.output_dir else None
     html_path = visualize_point_cloud(
         points, colors,
@@ -559,11 +605,13 @@ def main():
     )
 
     print("\n" + "=" * 60)
-    print("DEMO COMPLETE!")
+    print("ENROLLMENT COMPLETE!" if args.user_name else "DEMO COMPLETE!")
     print("=" * 60)
     print(f"Total keyframes: {len(keyframes)}")
     print(f"Total 3D points: {len(points):,}")
     print(f"ArcFace embedding: {'extracted' if face_embedding is not None else 'not available'}")
+    if template_path:
+        print(f"Template: {template_path}")
     print(f"Visualization: {html_path}")
     print()
     print("The 3D point cloud should be displayed in your browser.")

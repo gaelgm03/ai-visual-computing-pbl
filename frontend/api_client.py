@@ -76,6 +76,7 @@ class AuthResponse:
     final_score: float = 0.0
     geometric_score: float = 0.0
     descriptor_score: float = 0.0
+    embedding_score: float = 0.0
     anti_spoof_passed: bool = True
     processing_time_ms: float = 0.0
     error: Optional[str] = None
@@ -203,6 +204,7 @@ class MockBackend:
             final_score=np.random.uniform(0.55, 0.95) if is_match else np.random.uniform(0.3, 0.6),
             geometric_score=np.random.uniform(0.5, 0.9),
             descriptor_score=np.random.uniform(0.5, 0.95),
+            embedding_score=np.random.uniform(0.6, 0.98) if is_match else np.random.uniform(0.2, 0.5),
             anti_spoof_passed=True,
             processing_time_ms=np.random.uniform(300, 800),
         )
@@ -488,6 +490,7 @@ class APIClient:
                         final_score=data.get("final_score", 0.0),
                         geometric_score=data.get("geometric_score", 0.0),
                         descriptor_score=data.get("descriptor_score", 0.0),
+                        embedding_score=data.get("embedding_score", 0.0),
                         anti_spoof_passed=anti_spoof.get("passed", True),
                         processing_time_ms=data.get("processing_time_sec", 0.0) * 1000,
                     )

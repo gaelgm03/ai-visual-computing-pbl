@@ -441,6 +441,7 @@ def authenticate(frame: Optional[np.ndarray], selected_user: Optional[str]):
         final_score=api_result.final_score,
         geometric_score=api_result.geometric_score,
         descriptor_score=api_result.descriptor_score,
+        embedding_score=api_result.embedding_score,
         anti_spoof_passed=api_result.anti_spoof_passed,
         processing_time_sec=api_result.processing_time_ms / 1000,
     )
@@ -457,12 +458,13 @@ def create_score_visualization(result: AuthResult):
     """Create a gauge/bar chart for authentication scores."""
     scores = [
         ("Final", result.final_score),
+        ("Embedding", result.embedding_score),
         ("Geometric", result.geometric_score),
         ("Descriptor", result.descriptor_score),
     ]
-    
+
     colors = [auth_panel.get_score_color(s) for _, s in scores]
-    
+
     figure = {
         "data": [{
             "type": "bar",
@@ -475,16 +477,16 @@ def create_score_visualization(result: AuthResult):
         "layout": {
             "title": "Authentication Scores",
             "yaxis": {"title": "Score", "range": [0, 1]},
-            "width": 350,
+            "width": 400,
             "height": 250,
             "shapes": [{
                 "type": "line",
-                "x0": -0.5, "x1": 2.5,
+                "x0": -0.5, "x1": 3.5,
                 "y0": 0.65, "y1": 0.65,
                 "line": {"color": "red", "dash": "dash"},
             }],
             "annotations": [{
-                "x": 2.5, "y": 0.65,
+                "x": 3.5, "y": 0.65,
                 "text": "Threshold",
                 "showarrow": False,
                 "font": {"size": 10},

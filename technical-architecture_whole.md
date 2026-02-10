@@ -1043,10 +1043,10 @@ face_embedding:
   backend: "auto"               # "insightface", "facenet", or "auto"
 
 matching:
-  embedding_weight: 0.7         # ArcFace (primary identity signal) — added 2026-02-10
-  geometric_weight: 0.3         # ICP + Chamfer (supplementary 3D shape)
-  descriptor_weight: 0.0        # MASt3R descriptors (disabled — no identity discrimination)
-  accept_threshold: 0.55        # DS team tunes via grid search
+  embedding_weight: 0.40        # ArcFace (primary identity signal) — added 2026-02-10
+  geometric_weight: 0.10        # ICP + Chamfer (supplementary 3D shape)
+  descriptor_weight: 0.50       # MASt3R descriptors (view-correspondence features)
+  accept_threshold: 0.65        # tuned via public dataset evaluation
   icp_max_iterations: 50
   icp_convergence_threshold: 1e-6
   chamfer_normalization: "mean"

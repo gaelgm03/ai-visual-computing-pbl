@@ -6,7 +6,7 @@ MASt3R Face Authentication API.
 
 The application provides:
 - WebSocket endpoint for real-time enrollment
-- REST endpoints for authentication (TODO)
+- REST endpoints for authentication
 - REST endpoints for user management
 - Health check endpoint
 
@@ -22,22 +22,16 @@ Author: CS-1
 
 import logging
 import torch
-import numpy as np
 from contextlib import asynccontextmanager
-from typing import List
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes.enrollment import router as enrollment_router
+from api.routes.enrollment import rest_router as enrollment_rest_router
 from api.routes.authentication import router as authentication_router
-from api.schemas import (
-    UserInfo,
-    UserListResponse,
-    UserDetailResponse,
-    DeleteUserResponse,
-    HealthResponse,
-)
+from api.routes.management import router as management_router
+from api.schemas import HealthResponse
 from core.mast3r_engine import get_engine
 from core.template_manager import get_template_manager
 from core.config import get_config
@@ -132,129 +126,9 @@ app.add_middleware(
 
 # Include routers
 app.include_router(enrollment_router)
+app.include_router(enrollment_rest_router)
 app.include_router(authentication_router)
-
-
-# ============================================================
-# User Management Endpoints
-# ============================================================
-
-@app.get("/users", response_model=UserListResponse, tags=["users"])
-async def list_users():
-    """
-    List all enrolled users.
-
-    Returns summary information for each enrolled user including
-    their ID, name, enrollment time, and template statistics.
-    """
-    template_manager = get_template_manager()
-    users = template_manager.list_users()
-
-    return UserListResponse(
-        users=[
-            UserInfo(
-                user_id=u["user_id"],
-                user_name=u["user_name"],
-                enrolled_at=u["enrolled_at"],
-                n_points=u["n_points"],
-                n_frames_used=u["n_frames_used"],
-            )
-            for u in users
-        ],
-        total=len(users),
-    )
-
-
-@app.get("/users/{user_id}", response_model=UserDetailResponse, tags=["users"])
-async def get_user(user_id: str):
-    """
-    Get detailed information about a specific user.
-
-    Args:
-        user_id: The user's unique identifier.
-
-    Returns:
-        Detailed user information including template metadata.
-
-    Raises:
-        404: If the user is not found.
-    """
-    template_manager = get_template_manager()
-    user = template_manager.get_user(user_id)
-
-    if user is None:
-        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-
-    # Load full template to get enrollment metadata
-    template = template_manager.load_template(user_id)
-    enrollment_metadata = template.enrollment_metadata if template else None
-
-    return UserDetailResponse(
-        user_id=user["user_id"],
-        user_name=user["user_name"],
-        enrolled_at=user["enrolled_at"],
-        n_points=user["n_points"],
-        n_frames_used=user["n_frames_used"],
-        template_path=user.get("template_path"),
-        enrollment_metadata=enrollment_metadata,
-    )
-
-
-@app.get("/users/{user_id}/template", tags=["users"])
-async def get_user_template(user_id: str):
-    """
-    Get a user's point cloud template for 3D visualization.
-
-    Returns subsampled points and colors for efficient transfer.
-    """
-    template_manager = get_template_manager()
-    template = template_manager.load_template(user_id)
-
-    if template is None:
-        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-
-    # Subsample for reasonable transfer size
-    max_points = 5000
-    n_total = len(template.point_cloud)
-    if n_total > max_points:
-        indices = np.random.choice(n_total, max_points, replace=False)
-        points = template.point_cloud[indices].tolist()
-        colors = template.colors[indices].tolist() if template.colors is not None else None
-    else:
-        points = template.point_cloud.tolist()
-        colors = template.colors.tolist() if template.colors is not None else None
-
-    return {"points": points, "colors": colors}
-
-
-@app.delete("/users/{user_id}", response_model=DeleteUserResponse, tags=["users"])
-async def delete_user(user_id: str):
-    """
-    Delete an enrolled user and their template.
-
-    This permanently removes the user's enrollment data.
-
-    Args:
-        user_id: The user's unique identifier.
-
-    Returns:
-        Confirmation of deletion.
-
-    Raises:
-        404: If the user is not found.
-    """
-    template_manager = get_template_manager()
-
-    if not template_manager.user_exists(user_id):
-        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
-
-    success = template_manager.delete_template(user_id)
-
-    return DeleteUserResponse(
-        success=success,
-        user_id=user_id,
-        message=f"User {user_id} deleted successfully" if success else "Deletion failed",
-    )
+app.include_router(management_router)
 
 
 # ============================================================
