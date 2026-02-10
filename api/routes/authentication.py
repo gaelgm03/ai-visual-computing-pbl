@@ -9,6 +9,7 @@ Author: CS-1
 """
 
 import base64
+import json
 import time
 import logging
 import numpy as np
@@ -230,6 +231,19 @@ async def authenticate(request: AuthRequest):
 
     if not spoof_result.passed:
         logger.warning(f"Anti-spoofing check failed: {spoof_result.details}")
+        try:
+            template_manager = get_template_manager()
+            template_manager.log_authentication(
+                user_id=request.user_id or "unknown",
+                final_score=0.0,
+                geometric_score=0.0,
+                descriptor_score=0.0,
+                is_match=False,
+                anti_spoof_passed=False,
+                processing_time_ms=int((time.time() - start_time) * 1000),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to log auth attempt: {e}")
         return AuthResponse(
             is_match=False,
             matched_user_id=None,
@@ -342,8 +356,48 @@ async def authenticate(request: AuthRequest):
             logger.warning(f"Matching failed for {template.user_id}: {e}")
             continue
 
-    # 7. Build response
+    # 7. Build visualization data
+    viz_data = None
+    if best_match is not None:
+        try:
+            max_viz_points = 2000
+            if len(probe_cloud) > max_viz_points:
+                viz_idx = np.random.choice(len(probe_cloud), max_viz_points, replace=False)
+                viz_points = probe_cloud[viz_idx]
+                viz_colors = probe_result.colors[viz_idx] if probe_result.colors is not None else None
+            else:
+                viz_points = probe_cloud
+                viz_colors = probe_result.colors
+
+            cloud_data = {"points": viz_points.tolist()}
+            if viz_colors is not None:
+                cloud_data["colors"] = viz_colors.tolist()
+
+            probe_cloud_b64 = base64.b64encode(
+                json.dumps(cloud_data).encode()
+            ).decode()
+
+            viz_data = VisualizationData(
+                probe_cloud=probe_cloud_b64,
+                matched_points=None,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to build visualization data: {e}")
+
+    # 8. Log authentication attempt
     processing_time = time.time() - start_time
+    try:
+        template_manager.log_authentication(
+            user_id=best_match.user_id if best_match else (request.user_id or "unknown"),
+            final_score=max(0.0, best_score),
+            geometric_score=best_geo_score,
+            descriptor_score=best_desc_score,
+            is_match=best_match is not None,
+            anti_spoof_passed=True,
+            processing_time_ms=int(processing_time * 1000),
+        )
+    except Exception as e:
+        logger.warning(f"Failed to log auth attempt: {e}")
 
     return AuthResponse(
         is_match=best_match is not None,
@@ -359,5 +413,5 @@ async def authenticate(request: AuthRequest):
             planarity_ratio=spoof_result.eigenvalue_ratio,
         ),
         processing_time_sec=processing_time,
-        visualization_data=None,  # TODO: Add visualization data if needed
+        visualization_data=viz_data,
     )

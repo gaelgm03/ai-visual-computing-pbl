@@ -79,7 +79,9 @@ class TestUserManagementEndpoints:
         with patch("api.app.get_engine") as mock_engine:
             mock_engine.return_value._model_loaded = False
 
-            with patch("api.app.get_template_manager") as mock_tm:
+            # Mock template manager in both app.py and routes/management.py
+            with patch("api.app.get_template_manager") as mock_tm, \
+                 patch("api.routes.management.get_template_manager") as mock_tm2:
                 # Setup mock template manager
                 mock_manager = MagicMock()
                 mock_manager.get_stats.return_value = {
@@ -118,6 +120,7 @@ class TestUserManagementEndpoints:
                 mock_manager.user_exists.return_value = True
                 mock_manager.delete_template.return_value = True
                 mock_tm.return_value = mock_manager
+                mock_tm2.return_value = mock_manager
 
                 from api.app import app
                 yield TestClient(app)
@@ -152,7 +155,7 @@ class TestUserManagementEndpoints:
     def test_get_nonexistent_user(self, client):
         """Test getting a user that doesn't exist."""
         # Override mock for this test
-        with patch("api.app.get_template_manager") as mock_tm:
+        with patch("api.routes.management.get_template_manager") as mock_tm:
             mock_manager = MagicMock()
             mock_manager.get_user.return_value = None
             mock_manager.get_stats.return_value = {"total_users": 0}
@@ -172,7 +175,7 @@ class TestUserManagementEndpoints:
 
     def test_delete_nonexistent_user(self, client):
         """Test deleting a user that doesn't exist."""
-        with patch("api.app.get_template_manager") as mock_tm:
+        with patch("api.routes.management.get_template_manager") as mock_tm:
             mock_manager = MagicMock()
             mock_manager.user_exists.return_value = False
             mock_manager.get_stats.return_value = {"total_users": 0}

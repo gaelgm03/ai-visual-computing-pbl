@@ -18,6 +18,7 @@ class AuthResult:
     final_score: float = 0.0
     geometric_score: float = 0.0
     descriptor_score: float = 0.0
+    embedding_score: float = 0.0
     anti_spoof_passed: bool = True
     processing_time_sec: float = 0.0
     error_message: Optional[str] = None
@@ -68,12 +69,15 @@ class AuthPanel:
             return (
                 f"✅ Authenticated as **{result.matched_user_name}**\n"
                 f"Score: {result.final_score:.2f} "
-                f"(Geo: {result.geometric_score:.2f}, Desc: {result.descriptor_score:.2f})"
+                f"(Emb: {result.embedding_score:.2f}, Geo: {result.geometric_score:.2f}, "
+                f"Desc: {result.descriptor_score:.2f})"
             )
         else:
             return (
                 f"❌ Authentication failed\n"
-                f"Score: {result.final_score:.2f} (below threshold)"
+                f"Score: {result.final_score:.2f} (below threshold)\n"
+                f"(Emb: {result.embedding_score:.2f}, Geo: {result.geometric_score:.2f}, "
+                f"Desc: {result.descriptor_score:.2f})"
             )
     
     def get_score_color(self, score: float) -> str:

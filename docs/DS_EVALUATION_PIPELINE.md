@@ -393,17 +393,17 @@ if HAS_EMBEDDINGS:
     emb_matcher = ArcFaceEmbeddingMatcher({"embedding_dim": 512})
 
     multi_config = {
-        "embedding_weight": 0.7,
-        "geometric_weight": 0.3,
-        "descriptor_weight": 0.0,
-        "accept_threshold": 0.55,
+        "embedding_weight": 0.40,
+        "geometric_weight": 0.10,
+        "descriptor_weight": 0.50,
+        "accept_threshold": 0.65,
     }
     multi_fusion = MultiModalFusion(multi_config)
 
     print("Matchers initialized (3-way with ArcFace):")
     print(f"  Embedding: ArcFace cosine similarity (weight={multi_config['embedding_weight']})")
     print(f"  Geometric: ICP + Chamfer (weight={multi_config['geometric_weight']})")
-    print(f"  Descriptor: Reciprocal NN (weight={multi_config['descriptor_weight']} — disabled)")
+    print(f"  Descriptor: Reciprocal NN (weight={multi_config['descriptor_weight']})")
     print(f"  Fusion: MultiModalFusion, threshold={multi_config['accept_threshold']}")
 else:
     print("Matchers initialized (legacy 2-way, no ArcFace embeddings):")
@@ -945,10 +945,10 @@ Adjustable via the `config` dictionary in Cell 6.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `embedding_weight` | `0.7` | ArcFace embedding score weight (added 2026-02-10) |
-| `geometric_weight` | `0.3` | Geometric score weight |
-| `descriptor_weight` | `0.0` | MASt3R descriptor weight (disabled by default) |
-| `accept_threshold` | `0.55` | Accept/reject threshold (with ArcFace) |
+| `embedding_weight` | `0.40` | ArcFace embedding score weight (added 2026-02-10) |
+| `geometric_weight` | `0.10` | Geometric score weight |
+| `descriptor_weight` | `0.50` | MASt3R descriptor weight |
+| `accept_threshold` | `0.65` | Accept/reject threshold |
 | `icp.max_iterations` | `50` | ICP iteration count. More = better accuracy, slower |
 | `icp.max_correspondence_distance` | `0.05` | Max correspondence distance (meters) |
 | `chamfer_alpha` | `30.0` | Decay factor in `exp(-alpha*d)` |

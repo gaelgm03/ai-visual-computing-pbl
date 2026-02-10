@@ -26,6 +26,7 @@ from api.schemas import (
     FrameStatusResponse,
     EnrollmentCompleteResponse,
     EnrollmentErrorResponse,
+    BatchEnrollRequest,
     HeadPose,
     Coverage,
 )
@@ -47,8 +48,9 @@ from core.config import (
 # Setup logging
 logger = logging.getLogger(__name__)
 
-# Create router
+# Create routers
 router = APIRouter(prefix="/ws", tags=["enrollment"])
+rest_router = APIRouter(tags=["enrollment"])
 
 
 class EnrollmentSession:
@@ -472,3 +474,88 @@ async def websocket_enroll(websocket: WebSocket, user_name: str):
             await websocket.close()
         except Exception:
             pass
+
+
+# ============================================================
+# REST Batch Enrollment Endpoint
+# ============================================================
+
+
+@rest_router.post("/enroll", response_model=EnrollmentCompleteResponse)
+async def batch_enroll(request: BatchEnrollRequest):
+    """
+    Batch enrollment: accept user_name + base64 JPEG frames, run full pipeline.
+
+    This is the non-streaming alternative to the WebSocket enrollment.
+    All frames are submitted at once and processing happens server-side.
+
+    Args:
+        request: BatchEnrollRequest with user_name and base64 JPEG frames.
+
+    Returns:
+        EnrollmentCompleteResponse with enrollment result.
+    """
+    # Check if user name already exists
+    template_manager = get_template_manager()
+    if template_manager.user_exists_by_name(request.user_name):
+        raise HTTPException(
+            status_code=409,
+            detail=f"User '{request.user_name}' already exists.",
+        )
+
+    # Decode frames and detect faces
+    face_config = get_face_detection_config()
+    detector = FaceDetector(face_config)
+    keyframe_config = get_keyframe_config()
+    selector = KeyframeSelector(keyframe_config)
+
+    keyframe_candidates = []
+    for i, frame_b64 in enumerate(request.frames):
+        try:
+            img_bytes = base64.b64decode(frame_b64)
+            np_arr = np.frombuffer(img_bytes, np.uint8)
+            frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Failed to decode frame {i}: {e}")
+
+        if frame is None:
+            raise HTTPException(status_code=400, detail=f"Invalid image data in frame {i}")
+
+        detection = detector.detect(frame)
+        if detection is None:
+            logger.info(f"No face detected in batch frame {i}, skipping")
+            continue
+
+        cropped = detector.crop_face_region(frame, detection)
+        quality = selector.compute_quality_score(frame, detection)
+        candidate = KeyframeCandidate(
+            frame=cropped,
+            head_pose=(detection.head_pose[0], detection.head_pose[1], detection.head_pose[2]),
+            timestamp=time.time(),
+            quality_score=quality,
+        )
+        keyframe_candidates.append(candidate)
+
+    detector.close()
+
+    if len(keyframe_candidates) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Not enough faces detected ({len(keyframe_candidates)}). Need at least 2.",
+        )
+
+    # Create session and inject our keyframes
+    session = EnrollmentSession(request.user_name)
+    session.keyframe_candidates = keyframe_candidates
+
+    # Run MASt3R reconstruction and save template
+    engine = get_engine()
+    if not engine._model_loaded:
+        logger.info("Loading MASt3R model for batch enrollment...")
+        engine.load_model()
+
+    try:
+        result = await run_enrollment(session, engine, template_manager)
+        return result
+    finally:
+        session.cleanup()

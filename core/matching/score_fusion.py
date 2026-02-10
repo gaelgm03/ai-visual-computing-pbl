@@ -86,24 +86,24 @@ class MultiModalFusion:
     final_score = Σ (weight_i * score_i) for all active channels
     is_match = final_score >= threshold
 
-    Default weights prioritize ArcFace embeddings (the primary identity signal)
-    over geometric shape matching (supplementary) and MASt3R descriptors (disabled).
+    Default weights tuned on public dataset evaluation (2026-02-10):
+    embedding 0.40, geometric 0.10, descriptor 0.50.
 
     Args:
         config: Dictionary with keys:
-            - embedding_weight: Weight for ArcFace embedding score (default 0.7)
-            - geometric_weight: Weight for geometric score (default 0.3)
-            - descriptor_weight: Weight for MASt3R descriptor score (default 0.0)
-            - accept_threshold: Decision threshold (default 0.55)
+            - embedding_weight: Weight for ArcFace embedding score (default 0.40)
+            - geometric_weight: Weight for geometric score (default 0.10)
+            - descriptor_weight: Weight for MASt3R descriptor score (default 0.50)
+            - accept_threshold: Decision threshold (default 0.65)
     """
 
     def __init__(self, config: dict):
         self.weights = {
-            "embedding": config.get("embedding_weight", 0.7),
-            "geometric": config.get("geometric_weight", 0.3),
-            "descriptor": config.get("descriptor_weight", 0.0),
+            "embedding": config.get("embedding_weight", 0.40),
+            "geometric": config.get("geometric_weight", 0.10),
+            "descriptor": config.get("descriptor_weight", 0.50),
         }
-        self.threshold = config.get("accept_threshold", 0.55)
+        self.threshold = config.get("accept_threshold", 0.65)
 
         # Normalize weights of active channels (weight > 0)
         active_total = sum(w for w in self.weights.values() if w > 0)

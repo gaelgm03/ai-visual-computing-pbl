@@ -76,6 +76,17 @@ class EnrollmentErrorResponse(BaseModel):
     code: str = Field(default="ENROLLMENT_ERROR", description="Error code")
 
 
+class BatchEnrollRequest(BaseModel):
+    """Request for batch (non-streaming) enrollment."""
+    user_name: str = Field(..., description="Display name for the user")
+    frames: List[str] = Field(
+        ...,
+        min_length=2,
+        max_length=12,
+        description="List of base64-encoded JPEG images (2-12 frames)"
+    )
+
+
 # ============================================================
 # Authentication Schemas
 # ============================================================
