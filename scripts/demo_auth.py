@@ -2,11 +2,15 @@
 Authentication Demo Script - Full Pipeline Demo
 
 This script demonstrates the complete authentication pipeline:
-1. Real-time face capture (simplified - no pose targets)
+1. Real-time face capture with pose-guided targeting (yaw ±15°, pitch ±5°)
 2. MASt3R 3D reconstruction
 3. ArcFace embedding extraction
 4. Anti-spoofing check
 5. Template matching against enrolled users
+
+The capture phase guides the user to turn their head to 5 target
+directions (tolerance ±10°) so MASt3R receives sufficient parallax
+for a proper 3D reconstruction.
 
 Usage:
     # Capture frames from webcam and authenticate (requires GPU)
@@ -21,11 +25,11 @@ Usage:
     # 1:1 verification against a specific user
     python scripts/demo_auth.py --skip-capture --user-id usr_abc123
 
-    # Customize number of frames
-    python scripts/demo_auth.py --num-frames 5
+    # Customize number of target poses (max 5)
+    python scripts/demo_auth.py --num-frames 3
 
 Controls (during capture):
-    - Press SPACE to manually capture a frame
+    - Turn your head to the displayed direction to auto-capture
     - Press ENTER when ready to authenticate (if enough frames)
     - Press 'q' to quit
 
@@ -52,13 +56,14 @@ from core.config import get_face_detection_config, get_config
 
 def draw_auth_ui(frame: np.ndarray, detection: Optional[FaceDetection],
                  num_captured: int, num_target: int, fps: float,
-                 keyframe_flash: bool):
-    """Draw the simplified authentication capture UI overlay."""
+                 keyframe_flash: bool,
+                 guide_direction: str = ""):
+    """Draw the authentication capture UI overlay with pose guidance."""
     h, w = frame.shape[:2]
 
     # Semi-transparent header
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 60), (0, 0, 0), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 80), (0, 0, 0), -1)
     cv2.addWeighted(overlay, 0.6, frame, 0.4, 0, frame)
 
     if detection is not None:
@@ -89,6 +94,12 @@ def draw_auth_ui(frame: np.ndarray, detection: Optional[FaceDetection],
     cv2.rectangle(frame, (bar_x, 38), (bar_x + int(bar_w * progress), 53),
                   (0, 255, 0) if progress >= 1.0 else (0, 200, 255), -1)
 
+    # Direction guidance
+    if guide_direction and num_captured < num_target:
+        cv2.putText(frame, f"Look {guide_direction}",
+                    (10, 73), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65, (0, 255, 255), 2, cv2.LINE_AA)
+
     # FPS
     cv2.putText(frame, f"FPS: {fps:.0f}", (w - 90, 25),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
@@ -103,33 +114,78 @@ def draw_auth_ui(frame: np.ndarray, detection: Optional[FaceDetection],
                     (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
                     0.6, (0, 255, 0), 2, cv2.LINE_AA)
     else:
-        cv2.putText(frame, "SPACE=capture  ENTER=authenticate  q=quit",
+        cv2.putText(frame, "ENTER=authenticate  q=quit",
                     (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
 
-def capture_auth_frames(detector: FaceDetector,
-                        num_frames: int = 4) -> List[KeyframeCandidate]:
-    """
-    Capture frames from webcam for authentication.
+# ---------------------------------------------------------------------------
+# Auth capture target-pose system
+# ---------------------------------------------------------------------------
+# 5 target poses spread across yaw ±15° with slight pitch variation.
+# This ensures enough parallax for MASt3R 3D reconstruction and
+# anti-spoofing without requiring the wide range of enrollment (±25°).
+AUTH_TARGETS = [
+    (-15.0,  0.0),   # Right  (mirrored view)
+    ( -7.0,  5.0),   # Slight right + slight up
+    (  0.0,  0.0),   # Center
+    (  7.0, -5.0),   # Slight left + slight down
+    ( 15.0,  0.0),   # Left   (mirrored view)
+]
 
-    Simpler than enrollment capture - no pose targets, just auto-capture
-    when a face is detected (every ~1 second) or manual SPACE capture.
+# Tolerance (degrees) — capture triggers when head pose is within this
+# distance of an uncaptured target.  More lenient than enrollment's 7°.
+AUTH_TARGET_TOLERANCE = 10.0
+
+
+def _direction_label(yaw: float, pitch: float) -> str:
+    """Human-readable direction from yaw/pitch (mirrored for webcam)."""
+    parts = []
+    if yaw < -5:
+        parts.append("RIGHT")
+    elif yaw > 5:
+        parts.append("LEFT")
+    if pitch < -3:
+        parts.append("DOWN")
+    elif pitch > 3:
+        parts.append("UP")
+    return " & ".join(parts) if parts else "CENTER"
+
+
+def capture_auth_frames(detector: FaceDetector,
+                        num_frames: int = 5) -> List[KeyframeCandidate]:
+    """
+    Capture frames from webcam for authentication with pose targeting.
+
+    Uses pre-defined target poses (yaw ±15°, pitch ±5°).  A frame is
+    auto-captured when the user's head pose comes within
+    AUTH_TARGET_TOLERANCE (±10°) of an uncaptured target.
+
+    This ensures enough angular diversity for MASt3R to produce a solid
+    3D reconstruction and reliably pass anti-spoofing checks.
 
     Args:
         detector: FaceDetector instance.
-        num_frames: Target number of frames to capture.
+        num_frames: Number of target poses to use (max 5, default 5).
 
     Returns:
         List of KeyframeCandidate objects.
     """
+    # Select targets (use first num_frames targets from the list)
+    targets = AUTH_TARGETS[:min(num_frames, len(AUTH_TARGETS))]
+    captured_mask = [False] * len(targets)
+    target_labels = [_direction_label(y, p) for y, p in targets]
+
     print("\n" + "=" * 60)
     print("PHASE 1: Frame Capture for Authentication")
     print("=" * 60)
     print("Controls:")
-    print("  SPACE - Manually capture a frame")
     print("  ENTER - Start authentication (need at least 2 frames)")
     print("  q     - Quit")
+    print()
+    print(f"Turn your head to each direction (tolerance ±{AUTH_TARGET_TOLERANCE:.0f}°):")
+    for i, ((y, p), lbl) in enumerate(zip(targets, target_labels)):
+        print(f"  [{i+1}] yaw={y:+.0f}° pitch={p:+.0f}°  -> Look {lbl}")
     print()
 
     cap = cv2.VideoCapture(0)
@@ -143,10 +199,27 @@ def capture_auth_frames(detector: FaceDetector,
 
     keyframes: List[KeyframeCandidate] = []
     last_capture_time = 0
-    auto_capture_interval = 1.0  # seconds between auto-captures
     fps_start = time.time()
     fps_count = 0
     current_fps = 0.0
+
+    def _find_matching_target(yaw, pitch):
+        """Return index of closest uncaptured target within tolerance, or -1."""
+        best_idx, best_dist = -1, AUTH_TARGET_TOLERANCE
+        for idx, ((ty, tp), done) in enumerate(zip(targets, captured_mask)):
+            if done:
+                continue
+            dist = ((yaw - ty) ** 2 + (pitch - tp) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_idx = idx
+        return best_idx
+
+    def _next_uncaptured_label():
+        for idx, done in enumerate(captured_mask):
+            if not done:
+                return target_labels[idx]
+        return ""
 
     try:
         while True:
@@ -163,30 +236,37 @@ def capture_auth_frames(detector: FaceDetector,
                 fps_count = 0
                 fps_start = time.time()
 
-            # Detect face on clean frame
+            # Detect face
             clean_frame = frame.copy()
             detection = detector.detect(clean_frame)
             keyframe_flash = (time.time() - last_capture_time) < 0.3
 
-            # Auto-capture every ~1s when face detected and not enough frames yet
+            # Auto-capture when face matches an uncaptured target
             if (detection is not None
-                    and len(keyframes) < num_frames
-                    and time.time() - last_capture_time > auto_capture_interval):
-                cropped = detector.crop_face_region(clean_frame, detection)
-                candidate = KeyframeCandidate(
-                    frame=cropped,
-                    head_pose=detection.head_pose,
-                    timestamp=time.time(),
-                    quality_score=detection.confidence,
-                )
-                keyframes.append(candidate)
-                last_capture_time = time.time()
-                print(f"  Auto-captured frame {len(keyframes)}/{num_frames}: "
-                      f"yaw={detection.head_pose[0]:+.1f}, pitch={detection.head_pose[1]:+.1f}")
+                    and len(keyframes) < len(targets)
+                    and time.time() - last_capture_time > 0.5):
+                yaw, pitch, _roll = detection.head_pose
+                target_idx = _find_matching_target(yaw, pitch)
+                if target_idx >= 0:
+                    cropped = detector.crop_face_region(clean_frame, detection)
+                    candidate = KeyframeCandidate(
+                        frame=cropped,
+                        head_pose=detection.head_pose,
+                        timestamp=time.time(),
+                        quality_score=detection.confidence,
+                    )
+                    keyframes.append(candidate)
+                    captured_mask[target_idx] = True
+                    last_capture_time = time.time()
+                    lbl = target_labels[target_idx]
+                    print(f"  Captured [{target_idx+1}] {lbl}: "
+                          f"yaw={yaw:+.1f}, pitch={pitch:+.1f}")
 
             # Draw UI
-            draw_auth_ui(frame, detection, len(keyframes), num_frames,
-                         current_fps, keyframe_flash)
+            guide = _next_uncaptured_label()
+            draw_auth_ui(frame, detection, len(keyframes), len(targets),
+                         current_fps, keyframe_flash,
+                         guide_direction=guide)
             cv2.imshow("Authentication - Frame Capture", frame)
 
             # Handle keys
@@ -195,19 +275,6 @@ def capture_auth_frames(detector: FaceDetector,
                 print("Cancelled by user.")
                 keyframes.clear()
                 break
-            elif key == ord(' ') and detection is not None:
-                # Manual capture
-                cropped = detector.crop_face_region(clean_frame, detection)
-                candidate = KeyframeCandidate(
-                    frame=cropped,
-                    head_pose=detection.head_pose,
-                    timestamp=time.time(),
-                    quality_score=detection.confidence,
-                )
-                keyframes.append(candidate)
-                last_capture_time = time.time()
-                print(f"  Manual capture {len(keyframes)}: "
-                      f"yaw={detection.head_pose[0]:+.1f}, pitch={detection.head_pose[1]:+.1f}")
             elif key == 13 and len(keyframes) >= 2:  # ENTER
                 print(f"\nCapture complete! {len(keyframes)} frames collected.")
                 break
@@ -532,8 +599,8 @@ def main():
         help="User ID for 1:1 verification (omit for 1:N identification)",
     )
     parser.add_argument(
-        "--num-frames", type=int, default=4,
-        help="Number of frames to capture (default: 4)",
+        "--num-frames", type=int, default=5,
+        help="Number of target poses to capture (default: 5, max: 5)",
     )
     parser.add_argument(
         "--skip-capture", action="store_true",
