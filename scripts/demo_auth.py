@@ -162,39 +162,54 @@ def _direction_label(yaw: float, pitch: float) -> str:
 
 
 def capture_auth_frames(detector: FaceDetector,
-                        num_frames: int = 5) -> List[KeyframeCandidate]:
+                        num_frames: int = 5,
+                        resolution: str = "1280x720",
+                        timed_capture: bool = False) -> List[KeyframeCandidate]:
     """
-    Capture frames from webcam for authentication with pose targeting.
+    Capture frames from webcam for authentication.
 
-    Uses pre-defined target poses (yaw ±15°, pitch ±5°).  A frame is
-    auto-captured when the user's head pose comes within
-    AUTH_TARGET_TOLERANCE (±10°) of an uncaptured target.
-
-    This ensures enough angular diversity for MASt3R to produce a solid
-    3D reconstruction and reliably pass anti-spoofing checks.
+    Normal mode: pose-guided targeting (yaw ±15°, pitch ±5°).
+    Timed mode (--timed-capture): captures every 2 seconds when a face
+    is detected, regardless of head angle. Useful for demonstrating
+    anti-spoofing rejection against flat media (tablets, photos).
 
     Args:
         detector: FaceDetector instance.
-        num_frames: Number of target poses to use (max 5, default 5).
+        num_frames: Number of frames to capture (max 5 in pose mode).
+        resolution: Webcam resolution WxH string.
+        timed_capture: If True, use time-based capture instead of pose targeting.
 
     Returns:
         List of KeyframeCandidate objects.
     """
-    # Select targets (use first num_frames targets from the list)
-    targets = AUTH_TARGETS[:min(num_frames, len(AUTH_TARGETS))]
-    captured_mask = [False] * len(targets)
-    target_labels = [_direction_label(y, p) for y, p in targets]
+    TIMED_INTERVAL = 2.0  # seconds between captures in timed mode
+
+    # Select targets (only used in pose-guided mode)
+    if timed_capture:
+        targets = []
+        captured_mask = []
+        target_labels = []
+    else:
+        targets = AUTH_TARGETS[:min(num_frames, len(AUTH_TARGETS))]
+        captured_mask = [False] * len(targets)
+        target_labels = [_direction_label(y, p) for y, p in targets]
 
     print("\n" + "=" * 60)
     print("PHASE 1: Frame Capture for Authentication")
+    if timed_capture:
+        print("  (Timed capture mode — every 2 seconds)")
     print("=" * 60)
     print("Controls:")
     print("  ENTER - Start authentication (need at least 2 frames)")
     print("  q     - Quit")
     print()
-    print(f"Turn your head to each direction (tolerance ±{AUTH_TARGET_TOLERANCE:.0f}°):")
-    for i, ((y, p), lbl) in enumerate(zip(targets, target_labels)):
-        print(f"  [{i+1}] yaw={y:+.0f}° pitch={p:+.0f}°  -> Look {lbl}")
+    if timed_capture:
+        print(f"Timed capture: {num_frames} frames, one every {TIMED_INTERVAL:.0f}s.")
+        print("Hold still in front of the camera.")
+    else:
+        print(f"Turn your head to each direction (tolerance ±{AUTH_TARGET_TOLERANCE:.0f}°):")
+        for i, ((y, p), lbl) in enumerate(zip(targets, target_labels)):
+            print(f"  [{i+1}] yaw={y:+.0f}° pitch={p:+.0f}°  -> Look {lbl}")
     print()
 
     cap = cv2.VideoCapture(0)
@@ -202,9 +217,12 @@ def capture_auth_frames(detector: FaceDetector,
         print("ERROR: Could not open webcam!")
         return []
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    print("Webcam opened.")
+    res_w, res_h = map(int, resolution.split("x"))
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, res_w)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res_h)
+    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"Requested: {res_w}x{res_h}, Actual: {actual_w}x{actual_h}")
 
     # ------------------------------------------------------------------
     # Alignment phase: show face guide, wait for SPACE to start capture
@@ -282,34 +300,58 @@ def capture_auth_frames(detector: FaceDetector,
             detection = detector.detect(clean_frame)
             keyframe_flash = (time.time() - last_capture_time) < 0.3
 
-            # Auto-capture when face matches an uncaptured target
-            if (detection is not None
-                    and len(keyframes) < len(targets)
-                    and time.time() - last_capture_time > 0.5):
+            # Auto-capture logic
+            if detection is not None and len(keyframes) < num_frames:
                 yaw, pitch, _roll = detection.head_pose
-                target_idx = _find_matching_target(yaw, pitch)
-                if target_idx >= 0:
-                    cropped = detector.crop_face_region(clean_frame, detection)
-                    candidate = KeyframeCandidate(
-                        frame=cropped,
-                        head_pose=detection.head_pose,
-                        timestamp=time.time(),
-                        quality_score=detection.confidence,
-                    )
-                    keyframes.append(candidate)
-                    captured_mask[target_idx] = True
-                    last_capture_time = time.time()
-                    lbl = target_labels[target_idx]
-                    print(f"  Captured [{target_idx+1}] {lbl}: "
-                          f"yaw={yaw:+.1f}, pitch={pitch:+.1f}")
 
-            # Draw UI with pose grid
-            guide = _next_uncaptured_label()
-            draw_auth_ui(frame, detection, len(keyframes), len(targets),
-                         current_fps, keyframe_flash,
-                         guide_direction=guide,
-                         target_poses=targets,
-                         captured_mask=captured_mask)
+                if timed_capture:
+                    # Timed mode: capture every TIMED_INTERVAL seconds
+                    if time.time() - last_capture_time > TIMED_INTERVAL:
+                        cropped = detector.crop_face_region(clean_frame, detection)
+                        candidate = KeyframeCandidate(
+                            frame=cropped,
+                            head_pose=detection.head_pose,
+                            timestamp=time.time(),
+                            quality_score=detection.confidence,
+                        )
+                        keyframes.append(candidate)
+                        last_capture_time = time.time()
+                        print(f"  Captured [{len(keyframes)}/{num_frames}]: "
+                              f"yaw={yaw:+.1f}, pitch={pitch:+.1f}")
+                else:
+                    # Pose-guided mode: match against uncaptured targets
+                    if time.time() - last_capture_time > 0.5:
+                        target_idx = _find_matching_target(yaw, pitch)
+                        if target_idx >= 0:
+                            cropped = detector.crop_face_region(clean_frame, detection)
+                            candidate = KeyframeCandidate(
+                                frame=cropped,
+                                head_pose=detection.head_pose,
+                                timestamp=time.time(),
+                                quality_score=detection.confidence,
+                            )
+                            keyframes.append(candidate)
+                            captured_mask[target_idx] = True
+                            last_capture_time = time.time()
+                            lbl = target_labels[target_idx]
+                            print(f"  Captured [{target_idx+1}] {lbl}: "
+                                  f"yaw={yaw:+.1f}, pitch={pitch:+.1f}")
+
+            # Draw UI
+            if timed_capture:
+                elapsed = time.time() - last_capture_time
+                countdown = max(0, TIMED_INTERVAL - elapsed)
+                guide = f"Next in {countdown:.1f}s" if len(keyframes) < num_frames else ""
+                draw_auth_ui(frame, detection, len(keyframes), num_frames,
+                             current_fps, keyframe_flash,
+                             guide_direction=guide)
+            else:
+                guide = _next_uncaptured_label()
+                draw_auth_ui(frame, detection, len(keyframes), num_frames,
+                             current_fps, keyframe_flash,
+                             guide_direction=guide,
+                             target_poses=targets,
+                             captured_mask=captured_mask)
             cv2.imshow("Authentication - Frame Capture", frame)
 
             # Handle keys
@@ -662,6 +704,15 @@ def main():
         help="Capture frames and save to --output-dir, then exit "
              "(no MASt3R/matching). Use on Windows where GPU is unavailable.",
     )
+    parser.add_argument(
+        "--resolution", type=str, default="1280x720",
+        help="Webcam resolution WxH (default: 1280x720)",
+    )
+    parser.add_argument(
+        "--timed-capture", action="store_true",
+        help="Capture every 2s instead of pose-guided targeting. "
+             "Useful for anti-spoofing demo (flat media passes capture but fails matching).",
+    )
     args = parser.parse_args()
 
     print("=" * 60)
@@ -688,7 +739,9 @@ def main():
         detector = FaceDetector(face_config)
 
         try:
-            keyframes = capture_auth_frames(detector, num_frames=args.num_frames)
+            keyframes = capture_auth_frames(detector, num_frames=args.num_frames,
+                                              resolution=args.resolution,
+                                              timed_capture=args.timed_capture)
         finally:
             detector.close()
 

@@ -25,6 +25,57 @@ source ~/mast3r-face-auth/bin/activate
 
 ---
 
+## One-Command Workflow (Recommended)
+
+The orchestrator scripts automate the Windows/WSL2 handoff. Run from **Windows CMD** with the venv activated — the scripts handle path conversion, WSL invocation, and venv activation automatically.
+
+### Enrollment
+
+```cmd
+:: Activate venv
+mast3r-face-auth\Scripts\activate
+
+:: Enroll a new user (full pipeline: capture → reconstruct → register → visualize)
+python scripts/run_enroll.py --user-name "Alice"
+
+:: Custom keyframe directory and resolution
+python scripts/run_enroll.py --user-name "Alice" --keyframe-dir storage/demo_keyframes_v01 --resolution 1920x1080
+
+:: Reuse previously captured keyframes (no webcam needed)
+python scripts/run_enroll.py --user-name "Alice" --keyframe-dir storage/demo_keyframes --skip-capture
+```
+
+### Authentication
+
+```cmd
+:: 1:N identification (match against all enrolled users)
+python scripts/run_auth.py
+
+:: 1:1 verification against a specific user
+python scripts/run_auth.py --user-id usr_abc123
+
+:: Custom keyframe directory
+python scripts/run_auth.py --keyframe-dir storage/auth_keyframes_v02
+
+:: Reuse previously captured frames (no webcam needed)
+python scripts/run_auth.py --skip-capture --keyframe-dir storage/auth_keyframes
+
+:: Anti-spoofing demo: timed capture (every 2s, no pose requirement)
+:: Tablets/photos pass capture but get rejected by depth-based anti-spoofing
+python scripts/run_auth.py --timed-capture
+```
+
+### What Happens Behind the Scenes
+
+1. The orchestrator runs the capture script using the Windows Python venv
+2. Validates that keyframes were exported successfully (checks `metadata.json` + `keyframe_*.jpg`)
+3. Converts Windows paths to WSL `/mnt/c/...` paths automatically
+4. Invokes `wsl.exe bash -c "..."` to activate the WSL venv and run the GPU pipeline
+5. (Enrollment only) Finds and opens the latest `face_3d_*.html` visualization in the default browser
+6. Reports the final result
+
+---
+
 ## Stage 1: Keyframe Capture (Windows)
 
 Captures face keyframes with real-time pose guidance and angular coverage tracking.
