@@ -48,11 +48,14 @@ sys.path.insert(0, str(project_root))
 from core.face_detector import FaceDetector, FaceDetection
 from core.keyframe_selector import KeyframeSelector, KeyframeCandidate, CoverageStatus
 from core.config import get_face_detection_config, get_keyframe_config, get_mast3r_config
+from core.ui_overlay import draw_face_guide, draw_pose_grid
 
 
 def draw_capture_ui(frame: np.ndarray, detection: Optional[FaceDetection],
                     status: CoverageStatus, fps: float, keyframe_flash: bool,
-                    min_keyframes: int):
+                    min_keyframes: int,
+                    target_poses: Optional[List] = None,
+                    captured_indices: Optional[set] = None):
     """Draw the capture UI overlay."""
     h, w = frame.shape[:2]
 
@@ -127,6 +130,12 @@ def draw_capture_ui(frame: np.ndarray, detection: Optional[FaceDetection],
         cv2.putText(frame, guide_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
                     0.6, (0, 255, 255), 2, cv2.LINE_AA)
 
+    # Pose grid overlay (bottom-right)
+    if target_poses is not None and captured_indices is not None:
+        cur = (detection.head_pose[0], detection.head_pose[1]) if detection else None
+        draw_pose_grid(frame, target_poses, captured_indices, cur,
+                       yaw_range=(-30.0, 30.0), pitch_range=(-20.0, 20.0))
+
 
 def capture_keyframes(detector: FaceDetector, selector: KeyframeSelector,
                       min_keyframes: int = 8) -> List[KeyframeCandidate]:
@@ -148,8 +157,40 @@ def capture_keyframes(detector: FaceDetector, selector: KeyframeSelector,
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    print("Webcam opened. Starting capture...")
+    print("Webcam opened.")
 
+    # ------------------------------------------------------------------
+    # Alignment phase: show face guide, wait for SPACE to start capture
+    # ------------------------------------------------------------------
+    print("Align your face to the guide ellipse, then press SPACE to start.")
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                cap.release()
+                cv2.destroyAllWindows()
+                return []
+            frame = cv2.flip(frame, 1)
+            detection = detector.detect(frame.copy())
+            draw_face_guide(frame, face_detected=(detection is not None))
+            cv2.imshow("Enrollment Demo - Keyframe Capture", frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord(' '):
+                print("Starting capture...\n")
+                break
+            elif key == ord('q'):
+                print("Cancelled by user.")
+                cap.release()
+                cv2.destroyAllWindows()
+                return []
+    except Exception:
+        cap.release()
+        cv2.destroyAllWindows()
+        return []
+
+    # ------------------------------------------------------------------
+    # Capture phase: target-pose based keyframe collection
+    # ------------------------------------------------------------------
     keyframes: List[KeyframeCandidate] = []
     last_keyframe_time = 0
     fps_start = time.time()
@@ -194,8 +235,10 @@ def capture_keyframes(detector: FaceDetector, selector: KeyframeSelector,
             # Get coverage status
             status = selector.get_coverage_status(keyframes)
 
-            # Draw UI
-            draw_capture_ui(frame, detection, status, current_fps, keyframe_flash, min_keyframes)
+            # Draw UI with pose grid
+            draw_capture_ui(frame, detection, status, current_fps, keyframe_flash, min_keyframes,
+                            target_poses=selector.target_poses,
+                            captured_indices=selector._captured_target_indices)
 
             cv2.imshow("Enrollment Demo - Keyframe Capture", frame)
 

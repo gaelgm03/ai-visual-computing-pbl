@@ -52,12 +52,15 @@ sys.path.insert(0, str(project_root))
 from core.face_detector import FaceDetector, FaceDetection
 from core.keyframe_selector import KeyframeCandidate
 from core.config import get_face_detection_config, get_config
+from core.ui_overlay import draw_face_guide, draw_pose_grid
 
 
 def draw_auth_ui(frame: np.ndarray, detection: Optional[FaceDetection],
                  num_captured: int, num_target: int, fps: float,
                  keyframe_flash: bool,
-                 guide_direction: str = ""):
+                 guide_direction: str = "",
+                 target_poses: Optional[List] = None,
+                 captured_mask: Optional[List[bool]] = None):
     """Draw the authentication capture UI overlay with pose guidance."""
     h, w = frame.shape[:2]
 
@@ -118,19 +121,25 @@ def draw_auth_ui(frame: np.ndarray, detection: Optional[FaceDetection],
                     (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (200, 200, 200), 1, cv2.LINE_AA)
 
+    # Pose grid overlay (bottom-right)
+    if target_poses is not None and captured_mask is not None:
+        cur = (detection.head_pose[0], detection.head_pose[1]) if detection else None
+        draw_pose_grid(frame, target_poses, captured_mask, cur,
+                       yaw_range=(-20.0, 20.0), pitch_range=(-10.0, 10.0))
+
 
 # ---------------------------------------------------------------------------
 # Auth capture target-pose system
 # ---------------------------------------------------------------------------
-# 5 target poses spread across yaw ±15° with slight pitch variation.
-# This ensures enough parallax for MASt3R 3D reconstruction and
-# anti-spoofing without requiring the wide range of enrollment (±25°).
+# 5 target poses: center + 4 diagonal corners (yaw ±15°, pitch ±5°).
+# The corner layout maximises angular diversity in both axes, giving
+# MASt3R strong parallax for 3D reconstruction and anti-spoofing.
 AUTH_TARGETS = [
-    (-15.0,  0.0),   # Right  (mirrored view)
-    ( -7.0,  5.0),   # Slight right + slight up
     (  0.0,  0.0),   # Center
-    (  7.0, -5.0),   # Slight left + slight down
-    ( 15.0,  0.0),   # Left   (mirrored view)
+    (-15.0,  5.0),   # Upper-right  (user perspective)
+    ( 15.0,  5.0),   # Upper-left   (user perspective)
+    (-15.0, -5.0),   # Lower-right  (user perspective)
+    ( 15.0, -5.0),   # Lower-left   (user perspective)
 ]
 
 # Tolerance (degrees) — capture triggers when head pose is within this
@@ -195,8 +204,40 @@ def capture_auth_frames(detector: FaceDetector,
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-    print("Webcam opened. Starting capture...")
+    print("Webcam opened.")
 
+    # ------------------------------------------------------------------
+    # Alignment phase: show face guide, wait for SPACE to start capture
+    # ------------------------------------------------------------------
+    print("Align your face to the guide ellipse, then press SPACE to start.")
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                cap.release()
+                cv2.destroyAllWindows()
+                return []
+            frame = cv2.flip(frame, 1)
+            detection = detector.detect(frame.copy())
+            draw_face_guide(frame, face_detected=(detection is not None))
+            cv2.imshow("Authentication - Frame Capture", frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord(' '):
+                print("Starting capture...\n")
+                break
+            elif key == ord('q'):
+                print("Cancelled by user.")
+                cap.release()
+                cv2.destroyAllWindows()
+                return []
+    except Exception:
+        cap.release()
+        cv2.destroyAllWindows()
+        return []
+
+    # ------------------------------------------------------------------
+    # Capture phase: target-pose based keyframe collection
+    # ------------------------------------------------------------------
     keyframes: List[KeyframeCandidate] = []
     last_capture_time = 0
     fps_start = time.time()
@@ -262,11 +303,13 @@ def capture_auth_frames(detector: FaceDetector,
                     print(f"  Captured [{target_idx+1}] {lbl}: "
                           f"yaw={yaw:+.1f}, pitch={pitch:+.1f}")
 
-            # Draw UI
+            # Draw UI with pose grid
             guide = _next_uncaptured_label()
             draw_auth_ui(frame, detection, len(keyframes), len(targets),
                          current_fps, keyframe_flash,
-                         guide_direction=guide)
+                         guide_direction=guide,
+                         target_poses=targets,
+                         captured_mask=captured_mask)
             cv2.imshow("Authentication - Frame Capture", frame)
 
             # Handle keys

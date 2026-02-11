@@ -31,7 +31,7 @@ Captures face keyframes with real-time pose guidance and angular coverage tracki
 
 ```cmd
 :: Windows cmd (with venv activated)
-python scripts/demo_face_detector.py
+python scripts/demo_face_detector.py --export-dir storage/demo_keyframes --resolution 1280x720
 ```
 
 ### CLI Options
@@ -47,18 +47,25 @@ python scripts/demo_face_detector.py
 
 | Key | Action |
 |-----|--------|
+| `SPACE` | Start capture (during alignment phase) |
 | `e` | Export captured keyframes to disk |
-| `SPACE` | Manually trigger keyframe capture |
+| `r` | Reset keyframe collection |
 | `q` | Quit |
+
+### Capture Flow
+
+1. **Alignment phase**: A guide ellipse appears on screen. Position your face within it and press **SPACE** to begin capture.
+2. **Capture phase**: A **pose grid** overlay appears in the bottom-right corner, showing all target poses (12 by default, in a 6 yaw × 2 pitch grid). A **cyan dot** tracks your current head position in real-time. Auto-capture triggers when your head pose matches an uncaptured target (within ±7°). Captured targets turn **green**.
 
 ### What Happens
 
 1. Opens webcam at the specified resolution.
-2. MediaPipe detects faces and extracts 468 landmarks per frame.
-3. Computes head pose (yaw, pitch, roll) and blur score.
-4. Auto-captures keyframes when a novel pose is detected (angular distance from previous captures exceeds threshold).
-5. Displays pose guidance overlay showing which directions still need coverage.
-6. On `e`, saves keyframes as `keyframe_00.jpg`, `keyframe_01.jpg`, ... plus `head_poses.json` and `metadata.json`.
+2. Shows face guide ellipse — wait for the user to press SPACE.
+3. MediaPipe detects faces and extracts 468 landmarks per frame.
+4. Computes head pose (yaw, pitch, roll) and blur score.
+5. Auto-captures keyframes when a target pose is matched (angular distance within ±7° of an uncaptured target).
+6. Displays pose grid overlay showing captured (green) and uncaptured (gray) targets, plus current head position (cyan).
+7. On `e`, saves keyframes as `keyframe_00.jpg`, `keyframe_01.jpg`, ... plus `head_poses.json` and `metadata.json`.
 
 ### Output
 
@@ -98,7 +105,12 @@ python scripts/demo_enrollment.py --skip-capture \
 | `--output-dir` | (temp dir) | Directory to save visualization HTML (timestamped) |
 | `--user-name` | (none) | User name for template registration. If provided, saves `.npz` to `storage/templates/` |
 
-### What Happens
+### Capture Flow (when running with webcam, without `--skip-capture`)
+
+1. **Alignment phase**: A guide ellipse appears. Position your face and press **SPACE** to begin.
+2. **Capture phase**: Pose grid overlay shows 12 target poses. Auto-capture triggers within ±7° of uncaptured targets.
+
+### What Happens (with `--skip-capture`)
 
 1. **Load keyframes**: Reads `keyframe_*.jpg` and `metadata.json` from `--keyframe-dir`.
 2. **Face detection & cropping**: Detects faces, crops with `face_padding=0.3` and mean-color padding.
@@ -149,7 +161,7 @@ The `--capture-only` flag captures frames and saves them, then exits without run
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--user-id` | (none) | User ID for 1:1 verification; omit for 1:N identification |
-| `--num-frames` | `4` | Number of frames to capture |
+| `--num-frames` | `5` | Number of target poses to capture (max 5) |
 | `--skip-capture` | off | Load saved keyframes instead of opening webcam |
 | `--keyframe-dir` | `storage/demo_keyframes` | Directory for loading keyframes (with `--skip-capture`) |
 | `--output-dir` | (none) | Directory to save captured frames |
@@ -159,11 +171,14 @@ The `--capture-only` flag captures frames and saves them, then exits without run
 
 | Key | Action |
 |-----|--------|
-| `SPACE` | Manually capture a frame |
+| `SPACE` | Start capture (during alignment phase) |
 | `ENTER` | Finish capture (proceed to auth or exit) |
 | `q` | Cancel |
 
-Auto-capture triggers approximately every 1 second when a face is detected.
+#### Capture Flow
+
+1. **Alignment phase**: A guide ellipse appears on screen. Position your face within it and press **SPACE** to begin.
+2. **Capture phase**: A **pose grid** overlay in the bottom-right shows 5 target poses (center + 4 diagonal corners at yaw ±15°, pitch ±5°). A **cyan dot** tracks your current head position. Auto-capture triggers when your head matches an uncaptured target (within ±10°). Captured targets turn **green**. The text guidance shows which direction to look next.
 
 ### Step 3b: Run Authentication (WSL2)
 
@@ -268,13 +283,45 @@ Open `notebooks/ds_evaluation_pipeline.ipynb` on Google Colab and run all cells 
 
 ---
 
+## Managing Enrolled Users
+
+Enrolled templates can be listed and deleted via the `TemplateManager` API.
+
+### List All Enrolled Users
+
+```bash
+python -c "from core.template_manager import get_template_manager; [print(u) for u in get_template_manager().list_users()]"
+```
+
+### Delete a User by Name
+
+```bash
+python -c "
+from core.template_manager import get_template_manager
+tm = get_template_manager()
+user = tm.get_user_by_name('Alice')
+if user:
+    print(f'Deleting {user[\"user_id\"]}...')
+    tm.delete_template(user['user_id'])
+    print('Done')
+else:
+    print('Not found')
+"
+```
+
+This removes both the `.npz` template file from `storage/templates/` and the database record.
+
+> The same functionality is available via the REST API: `DELETE /users/{user_id}`.
+
+---
+
 ## Quick Reference: Command Sequence
 
 ```
 [Windows cmd]
 1. mast3r-face-auth\Scripts\activate
-2. python scripts/demo_face_detector.py --resolution 1280x720
-   → Press 'e' to export keyframes
+2. python scripts/demo_face_detector.py --export-dir storage/demo_keyframes --resolution 1280x720
+   → SPACE to start, turn head to targets, auto-exports when complete
 
 [WSL2 bash]
 3. source ~/mast3r-face-auth/bin/activate
@@ -314,7 +361,7 @@ matching:
 
 frontend:
   auth:
-    capture_frames: 4              # number of auth frames to capture
+    capture_frames: 5              # number of auth target poses to capture
 
 face_embedding:
   model: "buffalo_l"               # insightface model bundle
