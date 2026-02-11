@@ -46,6 +46,7 @@ sys.path.insert(0, str(project_root))
 from core.face_detector import FaceDetector, FaceDetection
 from core.keyframe_selector import KeyframeSelector, KeyframeCandidate, CoverageStatus
 from core.config import get_face_detection_config, get_keyframe_config
+from core.ui_overlay import draw_face_guide, draw_pose_grid
 
 
 def draw_landmarks(frame: np.ndarray, detection: FaceDetection, draw_all: bool = False):
@@ -168,7 +169,9 @@ def draw_head_pose_axes(frame: np.ndarray, detection: FaceDetection):
 
 def draw_info_panel(frame: np.ndarray, detection: FaceDetection,
                     status: CoverageStatus, fps: float, keyframe_captured: bool,
-                    target_count: int = 12):
+                    target_count: int = 12,
+                    target_poses=None,
+                    captured_indices=None):
     """
     Draw information panel on the frame.
     """
@@ -222,6 +225,12 @@ def draw_info_panel(frame: np.ndarray, detection: FaceDetection,
         guide_text = f"Align to Yaw={t_yaw:+.0f}, Pitch={t_pitch:+.0f} (keep Roll near 0)"
         cv2.putText(frame, guide_text, (10, h - 20), cv2.FONT_HERSHEY_SIMPLEX,
                     0.6, (0, 255, 255), 2, cv2.LINE_AA)
+
+    # Pose grid overlay (bottom-right)
+    if target_poses is not None and captured_indices is not None:
+        cur = (detection.head_pose[0], detection.head_pose[1])
+        draw_pose_grid(frame, target_poses, captured_indices, cur,
+                       yaw_range=(-30.0, 30.0), pitch_range=(-20.0, 20.0))
 
 
 def draw_no_face_message(frame: np.ndarray):
@@ -361,6 +370,32 @@ def main():
     print(f"Requested: {res_w}x{res_h}, Actual: {actual_w}x{actual_h}")
     print("Webcam opened successfully!")
     print()
+
+    # ------------------------------------------------------------------
+    # Alignment phase: show face guide, wait for SPACE to start capture
+    # ------------------------------------------------------------------
+    print("Align your face to the guide ellipse, then press SPACE to start.")
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            cap.release()
+            cv2.destroyAllWindows()
+            return
+        frame = cv2.flip(frame, 1)
+        det = detector.detect(frame.copy())
+        draw_face_guide(frame, face_detected=(det is not None))
+        cv2.imshow("Face Detection Demo - CS-1", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord(' '):
+            print("Starting capture...\n")
+            break
+        elif key == ord('q'):
+            print("Quitting...")
+            cap.release()
+            cv2.destroyAllWindows()
+            detector.close()
+            return
+
     print("Starting live demo... Press 'q' to quit.")
 
     # Auto-export settings: CLI argument takes priority over config
@@ -478,8 +513,10 @@ def main():
                 # Get coverage status
                 status = selector.get_coverage_status(keyframe_candidates)
 
-                # Draw info panel
-                draw_info_panel(frame, detection, status, current_fps, keyframe_captured, target_count)
+                # Draw info panel with pose grid
+                draw_info_panel(frame, detection, status, current_fps, keyframe_captured, target_count,
+                                target_poses=selector.target_poses,
+                                captured_indices=selector._captured_target_indices)
             else:
                 # No face detected
                 draw_no_face_message(frame)
