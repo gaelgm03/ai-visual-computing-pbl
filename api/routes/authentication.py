@@ -22,6 +22,7 @@ from api.schemas import (
     AuthRequest,
     AuthResponse,
     AntiSpoofResult as AntiSpoofResultSchema,
+    TemplateMatchScore,
     VisualizationData,
 )
 from core.face_detector import FaceDetector
@@ -148,28 +149,31 @@ async def authenticate(request: AuthRequest):
             )
         frames.append(frame)
 
-    logger.info(f"Authentication request: {len(frames)} frames, user_id={request.user_id}")
+    logger.info(f"Authentication request: {len(frames)} frames, user_id={request.user_id}, "
+                f"pre_cropped={request.pre_cropped}")
 
-    # 2. Detect and crop faces
-    face_config = get_face_detection_config()
-    face_detector = FaceDetector(face_config)
+    # 2. Prepare face-cropped BGR frames
+    if request.pre_cropped:
+        # Frames are already face-cropped BGR from capture phase — use directly
+        cropped_bgr = frames
+        logger.info("Using pre-cropped frames (skipping face detection)")
+    else:
+        # Detect and crop faces from raw frames
+        face_config = get_face_detection_config()
+        face_detector = FaceDetector(face_config)
 
-    cropped_faces = []
-    cropped_faces_bgr = []  # Keep BGR copies for ArcFace (insightface expects BGR)
-    for i, frame in enumerate(frames):
-        detection = face_detector.detect(frame)
-        if detection is None:
-            logger.warning(f"No face detected in frame {i}")
-            continue
-        cropped = face_detector.crop_face_region(frame, detection)
-        cropped_faces_bgr.append(cropped)
-        # Convert BGR to RGB for MASt3R
-        cropped_rgb = cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
-        cropped_faces.append(cropped_rgb)
+        cropped_bgr = []
+        for i, frame in enumerate(frames):
+            detection = face_detector.detect(frame)
+            if detection is None:
+                logger.warning(f"No face detected in frame {i}")
+                continue
+            cropped = face_detector.crop_face_region(frame, detection)
+            cropped_bgr.append(cropped)
 
-    face_detector.close()
+        face_detector.close()
 
-    if len(cropped_faces) < 2:
+    if len(cropped_bgr) < 2:
         return AuthResponse(
             is_match=False,
             matched_user_id=None,
@@ -188,13 +192,20 @@ async def authenticate(request: AuthRequest):
         )
 
     # 3. Build probe via MASt3R reconstruction
+    #    reconstruct_multiview expects BGR and converts internally
     engine = get_engine()
     if not engine._model_loaded:
         logger.info("Loading MASt3R model...")
         engine.load_model()
 
+    # Parse head_poses for pose-aware pairing (matches demo_auth.py behavior)
+    head_poses = None
+    if request.head_poses and len(request.head_poses) == len(cropped_bgr):
+        head_poses = [tuple(p) for p in request.head_poses]
+
+    recon_start = time.time()
     try:
-        probe_result = engine.reconstruct_multiview(cropped_faces)
+        probe_result = engine.reconstruct_multiview(cropped_bgr, head_poses=head_poses)
         probe_cloud = probe_result.point_cloud
         probe_descriptors = probe_result.descriptors
         probe_confidence = probe_result.confidence
@@ -204,8 +215,9 @@ async def authenticate(request: AuthRequest):
             status_code=500,
             detail=f"3D reconstruction failed: {str(e)}"
         )
+    recon_time = time.time() - recon_start
 
-    logger.info(f"Probe reconstruction: {len(probe_cloud)} points")
+    logger.info(f"Probe reconstruction: {len(probe_cloud):,} points in {recon_time:.1f}s")
 
     # 3b. Extract probe ArcFace embedding
     probe_embedding = None
@@ -215,7 +227,7 @@ async def authenticate(request: AuthRequest):
         embedding_config = get_config().get("face_embedding", {})
         embedder = FaceEmbedder(embedding_config)
         embedder.load_model()
-        probe_embedding = embedder.extract_multi_frame(cropped_faces_bgr)
+        probe_embedding = embedder.extract_multi_frame(cropped_bgr)
         if probe_embedding is not None:
             logger.info(f"Probe ArcFace embedding: norm={np.linalg.norm(probe_embedding):.4f}")
         else:
@@ -302,6 +314,7 @@ async def authenticate(request: AuthRequest):
     best_geo_score = 0.0
     best_desc_score = 0.0
     best_emb_score = 0.0
+    all_scores = []
 
     for template in templates:
         try:
@@ -331,19 +344,20 @@ async def authenticate(request: AuthRequest):
                     "descriptor": desc_result,
                 })
                 emb_score = emb_result.score
-                logger.debug(
-                    f"Match vs {template.user_name}: "
-                    f"emb={emb_result.score:.3f}, geo={geo_result.score:.3f}, "
-                    f"desc={desc_result.score:.3f}, fused={fused.score:.3f}"
-                )
             else:
                 fused = legacy_fusion.fuse(geo_result, desc_result)
                 emb_score = 0.0
-                logger.debug(
-                    f"Match vs {template.user_name} (no embedding): "
-                    f"geo={geo_result.score:.3f}, desc={desc_result.score:.3f}, "
-                    f"fused={fused.score:.3f}"
-                )
+
+            # Collect per-template scores
+            all_scores.append(TemplateMatchScore(
+                user_id=template.user_id,
+                user_name=template.user_name,
+                embedding_score=emb_score,
+                geometric_score=geo_result.score,
+                descriptor_score=desc_result.score,
+                fused_score=fused.score,
+                is_match=fused.is_match,
+            ))
 
             if fused.score > best_score:
                 best_score = fused.score
@@ -411,7 +425,12 @@ async def authenticate(request: AuthRequest):
             passed=True,
             depth_variance=spoof_result.depth_variance,
             planarity_ratio=spoof_result.eigenvalue_ratio,
+            confidence_mean=float(np.mean(probe_confidence)) if len(probe_confidence) > 0 else None,
         ),
+        n_probe_points=len(probe_cloud),
+        reconstruction_time_sec=recon_time,
+        n_templates=len(templates),
+        all_scores=all_scores,
         processing_time_sec=processing_time,
         visualization_data=viz_data,
     )

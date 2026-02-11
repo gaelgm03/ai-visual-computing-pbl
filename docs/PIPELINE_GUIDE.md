@@ -11,7 +11,7 @@ The pipeline spans two environments due to hardware constraints:
 | **Windows (cmd)** | Webcam capture (MediaPipe face detection) | Webcam access, `mast3r-face-auth` venv |
 | **WSL2 (bash)** | GPU-accelerated inference (MASt3R, ArcFace, matching) | NVIDIA GPU, deadsnakes Python 3.11 venv |
 
-> WSL2 cannot access the webcam. All capture steps run on Windows; all GPU inference steps run on WSL2. The shared filesystem (`/mnt/c/...`) bridges the two.
+> WSL2 cannot access the webcam. All capture steps run on Windows; all GPU inference steps run on WSL2. Communication is either via shared filesystem (`/mnt/c/...`) or the **API server** (HTTP over localhost).
 
 ### Activating the Virtual Environment
 
@@ -22,6 +22,94 @@ mast3r-face-auth\Scripts\activate
 # WSL2 (bash)
 source ~/mast3r-face-auth/bin/activate
 ```
+
+---
+
+## One-Command Workflow (Recommended)
+
+The orchestrator scripts automate the Windows/WSL2 handoff. Run from **Windows CMD** with the venv activated. Two backends are available:
+
+| Backend | Flag | Speed | Setup |
+|---------|------|-------|-------|
+| **API server** | `--api` | Fast (~25-35s) — model stays in GPU memory | Requires API server running on WSL2 |
+| **WSL spawn** | (default) | Slower (~55-65s) — model loads each time | No server needed |
+
+### Starting the API Server (WSL2)
+
+For `--api` mode, start the server once on WSL2 and keep it running:
+
+```bash
+# WSL2 bash
+source ~/mast3r-face-auth/bin/activate
+cd /mnt/c/Users/sekit/ai-visual-computing-pbl
+python -m api.app
+```
+
+The server pre-loads the MASt3R model at startup (~30-60s), then all subsequent requests use the model already in GPU memory. The server listens on `http://localhost:8000` by default.
+
+### Enrollment
+
+```cmd
+:: Activate venv
+mast3r-face-auth\Scripts\activate
+
+:: API mode (fast — requires server running on WSL2)
+python scripts/run_enroll.py --api --user-name "Alice"
+
+:: Legacy WSL spawn mode (slower, no server needed)
+python scripts/run_enroll.py --user-name "Alice"
+
+:: Custom keyframe directory and resolution
+python scripts/run_enroll.py --api --user-name "Alice" --keyframe-dir storage/demo_keyframes_v01 --resolution 1920x1080
+
+:: Reuse previously captured keyframes (no webcam needed)
+python scripts/run_enroll.py --api --user-name "Alice" --skip-capture
+```
+
+### Authentication
+
+```cmd
+:: API mode: 1:N identification (fast)
+python scripts/run_auth.py --api
+
+:: API mode: 1:1 verification against a specific user
+python scripts/run_auth.py --api --user-id usr_abc123
+
+:: Legacy WSL spawn mode (no server needed)
+python scripts/run_auth.py
+
+:: Custom keyframe directory
+python scripts/run_auth.py --api --keyframe-dir storage/auth_keyframes_v02
+
+:: Reuse previously captured frames (no webcam needed)
+python scripts/run_auth.py --api --skip-capture --keyframe-dir storage/auth_keyframes
+
+:: Anti-spoofing demo: timed capture (every 2s, no pose requirement)
+:: Tablets/photos pass capture but get rejected by depth-based anti-spoofing
+python scripts/run_auth.py --api --timed-capture
+```
+
+### What Happens Behind the Scenes
+
+**API mode (`--api`):**
+
+1. The orchestrator runs the capture script using the Windows Python venv
+2. Validates that keyframes were exported successfully (checks `metadata.json` + `keyframe_*.jpg`)
+3. Encodes keyframe JPEGs as base64 and sends via HTTP POST to the API server (`/enroll` or `/authenticate`)
+4. The server runs the full GPU pipeline (MASt3R + ArcFace + matching) using the pre-loaded model
+5. The orchestrator receives the JSON response and displays results
+6. (Enrollment only) Generates and opens a 3D visualization HTML from the point cloud preview
+
+**WSL spawn mode (default):**
+
+1. The orchestrator runs the capture script using the Windows Python venv
+2. Validates that keyframes were exported successfully
+3. Converts Windows paths to WSL `/mnt/c/...` paths automatically
+4. Invokes `wsl.exe bash -c "..."` to activate the WSL venv and run the GPU pipeline
+5. (Enrollment only) Finds and opens the latest `face_3d_*.html` visualization in the default browser
+6. Reports the final result
+
+> Both modes execute the **identical** GPU pipeline (same `reconstruct_multiview` call with pose-aware pairing, same ArcFace extraction, same matchers and fusion weights). The only difference is how the model is loaded — API mode reuses a pre-loaded model, WSL spawn loads from scratch each time.
 
 ---
 
@@ -316,6 +404,24 @@ This removes both the `.npz` template file from `storage/templates/` and the dat
 ---
 
 ## Quick Reference: Command Sequence
+
+### API Mode (Recommended for Demo)
+
+```
+[WSL2 bash — start once, keep running]
+1. source ~/mast3r-face-auth/bin/activate
+2. python -m api.app
+   → Waits 30-60s for model to load, then "Uvicorn running..."
+
+[Windows cmd — run as needed]
+3. mast3r-face-auth\Scripts\activate
+4. python scripts/run_enroll.py --api --user-name "Alice"
+   → Captures keyframes, sends to API, registers template
+5. python scripts/run_auth.py --api
+   → Captures keyframes, sends to API, shows match result
+```
+
+### Manual Mode (Two Terminals)
 
 ```
 [Windows cmd]

@@ -85,6 +85,14 @@ class BatchEnrollRequest(BaseModel):
         max_length=12,
         description="List of base64-encoded JPEG images (2-12 frames)"
     )
+    head_poses: Optional[List[List[float]]] = Field(
+        None,
+        description="Per-frame head poses [[yaw, pitch, roll], ...] for pose-aware pairing"
+    )
+    pre_cropped: bool = Field(
+        False,
+        description="If True, frames are already face-cropped; skip face detection"
+    )
 
 
 # ============================================================
@@ -100,9 +108,28 @@ class AuthRequest(BaseModel):
     frames: List[str] = Field(
         ...,
         min_length=2,
-        max_length=4,
-        description="List of base64-encoded JPEG images (2-4 frames)"
+        max_length=12,
+        description="List of base64-encoded JPEG images (2-12 frames)"
     )
+    head_poses: Optional[List[List[float]]] = Field(
+        None,
+        description="Per-frame head poses [[yaw, pitch, roll], ...] for pose-aware pairing"
+    )
+    pre_cropped: bool = Field(
+        False,
+        description="If True, frames are already face-cropped; skip face detection"
+    )
+
+
+class TemplateMatchScore(BaseModel):
+    """Per-template matching scores."""
+    user_id: str = Field(..., description="Template user ID")
+    user_name: str = Field(..., description="Template user name")
+    embedding_score: float = Field(0.0, description="ArcFace embedding score")
+    geometric_score: float = Field(0.0, description="Geometric score")
+    descriptor_score: float = Field(0.0, description="Descriptor score")
+    fused_score: float = Field(0.0, description="Fused score")
+    is_match: bool = Field(False, description="Whether this template matched")
 
 
 class AntiSpoofResult(BaseModel):
@@ -110,6 +137,7 @@ class AntiSpoofResult(BaseModel):
     passed: bool = Field(..., description="Whether anti-spoofing check passed")
     depth_variance: float = Field(..., description="Depth variance of reconstructed face")
     planarity_ratio: float = Field(..., description="Planarity ratio (lower = more 3D)")
+    confidence_mean: Optional[float] = Field(None, description="Mean confidence of reconstruction")
 
 
 class VisualizationData(BaseModel):
@@ -131,6 +159,13 @@ class AuthResponse(BaseModel):
     descriptor_score: float = Field(..., description="Descriptor matching score (0-1)")
     embedding_score: float = Field(0.0, description="ArcFace embedding match score (0-1)")
     anti_spoof: AntiSpoofResult = Field(..., description="Anti-spoofing results")
+    n_probe_points: int = Field(0, description="Number of 3D points in probe reconstruction")
+    reconstruction_time_sec: float = Field(0.0, description="MASt3R reconstruction time")
+    n_templates: int = Field(0, description="Number of templates compared against")
+    all_scores: List[TemplateMatchScore] = Field(
+        default_factory=list,
+        description="Per-template comparison scores"
+    )
     processing_time_sec: float = Field(..., description="Total processing time in seconds")
     visualization_data: Optional[VisualizationData] = Field(
         None,
