@@ -225,12 +225,13 @@ async def run_enrollment(
     """
     start_time = time.time()
 
-    # Get frames from session
+    # Get frames and head poses from session
     frames = session.get_frames()
+    head_poses = [kf.head_pose for kf in session.keyframe_candidates]
     logger.info(f"Starting 3D reconstruction with {len(frames)} frames")
 
-    # Run MASt3R multiview reconstruction
-    result = engine.reconstruct_multiview(frames)
+    # Run MASt3R multiview reconstruction with pose-aware pairing
+    result = engine.reconstruct_multiview(frames, head_poses=head_poses)
 
     reconstruction_time = time.time() - start_time
     logger.info(
@@ -503,13 +504,8 @@ async def batch_enroll(request: BatchEnrollRequest):
             detail=f"User '{request.user_name}' already exists.",
         )
 
-    # Decode frames and detect faces
-    face_config = get_face_detection_config()
-    detector = FaceDetector(face_config)
-    keyframe_config = get_keyframe_config()
-    selector = KeyframeSelector(keyframe_config)
-
-    keyframe_candidates = []
+    # Decode frames
+    decoded_frames = []
     for i, frame_b64 in enumerate(request.frames):
         try:
             img_bytes = base64.b64decode(frame_b64)
@@ -520,23 +516,50 @@ async def batch_enroll(request: BatchEnrollRequest):
 
         if frame is None:
             raise HTTPException(status_code=400, detail=f"Invalid image data in frame {i}")
+        decoded_frames.append(frame)
 
-        detection = detector.detect(frame)
-        if detection is None:
-            logger.info(f"No face detected in batch frame {i}, skipping")
-            continue
+    # Build keyframe candidates
+    keyframe_candidates = []
 
-        cropped = detector.crop_face_region(frame, detection)
-        quality = selector.compute_quality_score(frame, detection)
-        candidate = KeyframeCandidate(
-            frame=cropped,
-            head_pose=(detection.head_pose[0], detection.head_pose[1], detection.head_pose[2]),
-            timestamp=time.time(),
-            quality_score=quality,
-        )
-        keyframe_candidates.append(candidate)
+    if request.pre_cropped:
+        # Frames are already face-cropped — use directly with provided head_poses
+        for i, frame in enumerate(decoded_frames):
+            pose = (0.0, 0.0, 0.0)
+            if request.head_poses and i < len(request.head_poses):
+                p = request.head_poses[i]
+                pose = (p[0], p[1], p[2] if len(p) > 2 else 0.0)
+            candidate = KeyframeCandidate(
+                frame=frame,
+                head_pose=pose,
+                timestamp=time.time(),
+                quality_score=1.0,
+            )
+            keyframe_candidates.append(candidate)
+        logger.info(f"Using {len(keyframe_candidates)} pre-cropped frames for enrollment")
+    else:
+        # Detect and crop faces from raw frames
+        face_config = get_face_detection_config()
+        detector = FaceDetector(face_config)
+        keyframe_config = get_keyframe_config()
+        selector = KeyframeSelector(keyframe_config)
 
-    detector.close()
+        for i, frame in enumerate(decoded_frames):
+            detection = detector.detect(frame)
+            if detection is None:
+                logger.info(f"No face detected in batch frame {i}, skipping")
+                continue
+
+            cropped = detector.crop_face_region(frame, detection)
+            quality = selector.compute_quality_score(frame, detection)
+            candidate = KeyframeCandidate(
+                frame=cropped,
+                head_pose=(detection.head_pose[0], detection.head_pose[1], detection.head_pose[2]),
+                timestamp=time.time(),
+                quality_score=quality,
+            )
+            keyframe_candidates.append(candidate)
+
+        detector.close()
 
     if len(keyframe_candidates) < 2:
         raise HTTPException(

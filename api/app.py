@@ -65,11 +65,10 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing MASt3R engine...")
     engine = get_engine()
 
-    # Optionally pre-load the model (can also be lazy-loaded on first request)
-    # Uncomment below to preload at startup:
-    # logger.info("Pre-loading MASt3R model (this may take 30-60 seconds)...")
-    # engine.load_model()
-    # logger.info("Model loaded successfully!")
+    # Pre-load MASt3R model at startup so first request is fast
+    logger.info("Pre-loading MASt3R model (this may take 30-60 seconds)...")
+    engine.load_model()
+    logger.info("Model loaded successfully!")
 
     # Initialize template manager (singleton)
     logger.info("Initializing template manager...")
@@ -205,6 +204,6 @@ if __name__ == "__main__":
         "api.app:app",
         host=host,
         port=port,
-        reload=True,
+        reload=False,
         log_level="info",
     )
